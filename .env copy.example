@@ -11,8 +11,12 @@ PORT=8000
 # 复杂类型（List）用 JSON 写法
 CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
 
+# ---- SSE ----
+# 空闲心跳间隔（秒），需小于网关/负载均衡的空闲超时（常见 60s）
+SSE_HEARTBEAT_SECONDS=15
+
 # ---- LLM（LangChain，OpenAI 兼容网关）----
-# 不配置密钥 = 功能关闭：服务照常启动，/api/v1/llm/* 返回 503
+# 不配置密钥 = 功能关闭：服务照常启动，/api/v1/chat/* 返回 503
 LLM_API_KEY=
 # 留空走 OpenAI 官方；填自建/第三方网关，如 https://api.deepseek.com/v1
 LLM_BASE_URL=

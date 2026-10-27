@@ -1,4 +1,4 @@
-"""LLM 对话接口的数据契约。"""
+"""对话接口的数据契约：一次性响应与 SSE 流式帧。"""
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -51,7 +51,20 @@ class ChatResponse(BaseModel):
     )
 
 
-class LLMStatusResponse(BaseModel):
+class ChatStatusResponse(BaseModel):
     configured: bool = Field(..., description="是否已配置 API 密钥")
     model: str = Field(..., description="配置的模型名", examples=["deepseek-chat"])
     base_url: str = Field(..., description="网关地址（未配置时为空串）")
+
+
+class StreamChunk(BaseModel):
+    """SSE 增量帧：event=delta。"""
+
+    delta: str = Field(..., description="本次增量文本")
+
+
+class StreamError(BaseModel):
+    """SSE 错误帧：event=error。流已开始后无法再改 HTTP 状态码，只能靠事件传递。"""
+
+    code: int = Field(..., description="等价 HTTP 状态码", examples=[502])
+    message: str = Field(..., description="中性错误摘要")

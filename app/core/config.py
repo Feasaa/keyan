@@ -26,7 +26,8 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # 接口与文档
-    API_V1_PREFIX: str = "/api/v1"
+    # 版本只体现在 URL 契约里，目录结构不再嵌套 v1
+    API_PREFIX: str = "/api/v1"
     DOCS_URL: str = "/docs"
     OPENAPI_URL: str = "/api/v1/openapi.json"
 
@@ -37,8 +38,11 @@ class Settings(BaseSettings):
     HOST: str = "127.0.0.1"
     PORT: int = 8000
 
+    # SSE：无数据时的心跳间隔（秒）。要小于网关/负载均衡的空闲超时（常见 60s）
+    SSE_HEARTBEAT_SECONDS: float = 15.0
+
     # LLM（LangChain，OpenAI 兼容网关）
-    # 密钥为空 = 功能关闭，服务照常启动，/api/v1/llm/* 返回 503
+    # 密钥为空 = 功能关闭，服务照常启动，/api/v1/chat/* 返回 503
     LLM_API_KEY: str = ""
     LLM_BASE_URL: str = ""
     LLM_MODEL: str = "deepseek-flash"

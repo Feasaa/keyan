@@ -9,8 +9,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.v1.router import api_router
 from app.core.config import settings
+from app.router import api_router
 
 
 @asynccontextmanager
@@ -40,7 +40,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    application.include_router(api_router, prefix=settings.API_V1_PREFIX)
+    application.include_router(api_router, prefix=settings.API_PREFIX)
     return application
 
 
