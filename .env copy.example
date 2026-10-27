@@ -26,7 +26,6 @@ LLM_MAX_RETRIES=2
 LLM_TEMPERATURE=0.7
 
 # ---- 提示词 ----
-# 默认值来自 app/prompts/（system.py、assistant.py），此处留空即用代码内定义；
-# 仅在需要按环境临时覆盖时才填写。
-# LLM_SYSTEM_PROMPT=
-# LLM_ASSISTANT_PROMPT=
+# 正文在 app/prompts/files/*.md，这里只选"用哪个"。
+# 切换提示词变体（灰度/租户）改这一项即可，不必改代码。
+PROMPT_CHAT_SYSTEM_ID=chat_system

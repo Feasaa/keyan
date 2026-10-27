@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.config import get_settings
 from app.main import app
 from app.services.llm_service import LLMService, get_llm_service
 
@@ -46,12 +47,12 @@ class ExplodingChain:
 
 
 def _make_service(chain: Any, configured: bool) -> LLMService:
-    """绕过 __init__ 构造服务实例，只填路由层会读的字段。"""
-    service = LLMService.__new__(LLMService)
+    """用真实配置构造服务，再替换掉链 —— 提示词解析等逻辑保持真实行为。"""
+    service = LLMService(get_settings())
+    service._chain = chain  # noqa: SLF001
     service.configured = configured
     service.model = "stub-model"
     service.base_url = ""
-    service._chain = chain  # noqa: SLF001
     return service
 
 

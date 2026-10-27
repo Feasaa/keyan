@@ -2,8 +2,12 @@
 
 客户端是进程级单例：内部持有 httpx 连接池，每请求新建会导致连接风暴。
 未配置密钥时不构建链，调用方拿到 LLMNotConfiguredError，由路由层映射 503。
+
+提示词以运行时变量传入链（`{system_prompt}`），不在建链时固化 ——
+这样改提示词文件只影响后续请求，不必重建客户端、也不会丢连接池。
 """
 
+import logging
 from collections.abc import AsyncIterator
 from functools import lru_cache
 
@@ -13,14 +17,18 @@ from langchain_core.runnables import RunnableSerializable
 from langchain_openai import ChatOpenAI
 
 from app.core.config import Settings, get_settings
-from app.prompts import compose_system_prompt
+from app.prompts import Prompt, PromptKey, get_prompt
 from app.schemas.chat import ChatRequest
 from app.services.exceptions import LLMNotConfiguredError, LLMUpstreamError
+
+logger = logging.getLogger(__name__)
 
 
 class LLMService:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        # 非法 id 在这里就抛 ValueError，启动即失败，而不是等第一次请求
+        self._prompt_key = PromptKey(settings.PROMPT_CHAT_SYSTEM_ID)
         self._chain: RunnableSerializable | None = None
         if settings.LLM_API_KEY:
             self._chain = self._build_chain(settings)
@@ -28,18 +36,17 @@ class LLMService:
         self.model = settings.LLM_MODEL
         self.base_url = settings.LLM_BASE_URL
 
+    @property
+    def prompt(self) -> Prompt:
+        """每次调用现取：提示词文件改动后立即生效，无需重启。"""
+        return get_prompt(self._prompt_key)
+
     @staticmethod
     def _build_chain(settings: Settings) -> RunnableSerializable:
         prompt = ChatPromptTemplate.from_messages(
             [
-                # 系统提示词与助理提示词只在服务端注入，客户端无法覆盖
-                (
-                    "system",
-                    compose_system_prompt(
-                        settings.LLM_SYSTEM_PROMPT,
-                        settings.LLM_ASSISTANT_PROMPT,
-                    ),
-                ),
+                # system 内容运行时注入，客户端无法覆盖（见 schemas/chat.py 的 role 白名单）
+                ("system", "{system_prompt}"),
                 ("placeholder", "{history}"),
                 ("human", "{message}"),
             ]
@@ -62,8 +69,9 @@ class LLMService:
         if self._chain is None:
             raise LLMNotConfiguredError()
 
-    def _chain_inputs(self, payload: ChatRequest) -> dict:
+    def _chain_inputs(self, payload: ChatRequest, prompt: Prompt) -> dict:
         return {
+            "system_prompt": prompt.text,
             "history": [(msg.role, msg.content) for msg in payload.history],
             "message": payload.message,
         }
@@ -77,8 +85,17 @@ class LLMService:
         if chain is None:  # 仅为类型收窄，逻辑上不会走到
             raise LLMNotConfiguredError()
 
+        prompt = self.prompt
+        # 记录用了哪版提示词：线上答歪时，这是唯一能回溯的线索
+        logger.info(
+            "chat model=%s prompt=%s v=%s hash=%s",
+            self.model,
+            prompt.id,
+            prompt.version,
+            prompt.checksum,
+        )
         try:
-            answer: str = chain.invoke(self._chain_inputs(payload))
+            answer: str = chain.invoke(self._chain_inputs(payload, prompt))
         except Exception as exc:
             raise LLMUpstreamError(type(exc).__name__) from exc
         return answer, self.model
@@ -93,8 +110,16 @@ class LLMService:
         if chain is None:  # 仅为类型收窄
             raise LLMNotConfiguredError()
 
+        prompt = self.prompt
+        logger.info(
+            "chat stream model=%s prompt=%s v=%s hash=%s",
+            self.model,
+            prompt.id,
+            prompt.version,
+            prompt.checksum,
+        )
         try:
-            async for chunk in chain.astream(self._chain_inputs(payload)):
+            async for chunk in chain.astream(self._chain_inputs(payload, prompt)):
                 if chunk:
                     yield chunk
         except Exception as exc:

@@ -55,6 +55,8 @@ class ChatStatusResponse(BaseModel):
     configured: bool = Field(..., description="是否已配置 API 密钥")
     model: str = Field(..., description="配置的模型名", examples=["deepseek-chat"])
     base_url: str = Field(..., description="网关地址（未配置时为空串）")
+    prompt_id: str = Field(..., description="当前使用的提示词 id", examples=["chat_system"])
+    prompt_version: int = Field(..., description="提示词版本，排障时用于回溯", examples=[1])
 
 
 class StreamChunk(BaseModel):

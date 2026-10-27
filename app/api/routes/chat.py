@@ -143,13 +143,16 @@ async def _event_source(
     "/status",
     response_model=ChatStatusResponse,
     summary="对话功能状态",
-    description="探测 LLM 是否已配置，不打真网络。",
+    description="探测 LLM 是否已配置、当前使用哪版提示词，不打真网络。",
 )
 async def chat_status(
     service: LLMService = Depends(get_llm_service),
 ) -> ChatStatusResponse:
+    prompt = service.prompt
     return ChatStatusResponse(
         configured=service.configured,
         model=service.model,
         base_url=service.base_url,
+        prompt_id=prompt.id,
+        prompt_version=prompt.version,
     )

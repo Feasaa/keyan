@@ -39,10 +39,10 @@ sr/
 │   ├── core/                   # 基础设施：配置、SSE 工具（与业务无关）
 │   │   ├── config.py           # 全局配置（≈ application.yml + @ConfigurationProperties）
 │   │   └── sse.py              # SSE 编码 + 心跳（与具体业务解耦，可复用）
-│   ├── prompts/                # 提示词（与代码分离，便于评审调优）
-│   │   ├── system.py           # 系统提示词：角色与硬约束
-│   │   ├── assistant.py        # 助理提示词：人设与语气
-│   │   └── registry.py         # 按名字取提示词 + 拼接工具
+│   ├── prompts/                # 提示词（正文是文件，不是代码常量）
+│   │   ├── files/chat_system.md  # 提示词正文 + 元数据（id / version / description）
+│   │   ├── loader.py           # 加载与校验（不合法启动即失败）
+│   │   └── registry.py         # 按 id 取用 + 按 mtime 热更新
 │   ├── api/                    # 接口层（FastAPI 惯例）
 │   │   ├── __init__.py         # 只导出 api_router
 │   │   ├── router.py           # 路由聚合（≈ 组件扫描的"手写替代品"）
@@ -263,14 +263,14 @@ data: [DONE]
 
 ### 配置（.env）
 
-`LLM_API_KEY`（不填 = 功能关闭，主服务不受影响）、`LLM_BASE_URL`（OpenAI 兼容网关）、`LLM_MODEL`、`LLM_TIMEOUT_SECONDS`、`LLM_MAX_RETRIES`、`LLM_TEMPERATURE`、`SSE_HEARTBEAT_SECONDS`。提示词默认取自 `app/prompts/`，可用 `LLM_SYSTEM_PROMPT` / `LLM_ASSISTANT_PROMPT` 覆盖。
+`LLM_API_KEY`（不填 = 功能关闭，主服务不受影响）、`LLM_BASE_URL`（OpenAI 兼容网关）、`LLM_MODEL`、`LLM_TIMEOUT_SECONDS`、`LLM_MAX_RETRIES`、`LLM_TEMPERATURE`、`SSE_HEARTBEAT_SECONDS`、`PROMPT_CHAT_SYSTEM_ID`（用哪份提示词）。提示词正文不在配置里，在 `app/prompts/files/*.md`。
 
 安全要点：历史消息 role 白名单只允许 `user`/`assistant` —— 客户端伪造 `system` 角色会被 422 拦截（防提示注入）；系统提示词仅由服务端配置注入。
 
 ```powershell
 # 未配置密钥时
 curl.exe http://127.0.0.1:8000/api/v1/chat/status
-# {"configured":false,"model":"deepseek-chat","base_url":""}
+# {"configured":false,...,"prompt_id":"chat_system","prompt_version":1}
 
 # 流式对话（-N 关闭 curl 自身缓冲，才能看到逐块输出）
 curl.exe -N -X POST http://127.0.0.1:8000/api/v1/chat/stream -H "Content-Type: application/json" -d "{\"message\":\"你好\"}"
@@ -282,30 +282,56 @@ curl.exe -N -X POST http://127.0.0.1:8000/api/v1/chat/stream -H "Content-Type: a
 prompt | model | parser
 ```
 
-- `prompt`：`ChatPromptTemplate`，system 提示词 + `{history}` 占位 + `{message}`
+- `prompt`：`ChatPromptTemplate`，system 用 `{system_prompt}` **运行时占位**，另加 `{history}`、`{message}`
 - `model`：`ChatOpenAI`（OpenAI 兼容协议，可指向 DeepSeek / one-api 等网关）
 - `parser`：`StrOutputParser`，把 `AIMessage` 转成纯文本
 
 同一套链同时支持 `invoke()`（一次性）与 `astream()`（流式），换模型只改工厂一行。
 
+> system 用占位符而不是建链时写死，是为了让提示词可热更新：改文件不影响已建好的链和 httpx 连接池，下一次请求自动用新内容。
+
 ### 提示词管理（app/prompts/）
 
-提示词不写在业务代码里，而是独立成包，`config.py` 导入其默认值：
+提示词是**数据**，不是代码常量。正文放 Markdown 文件，元数据写在 front matter：
 
-| 文件 | 内容 | 作用 |
-| --- | --- | --- |
-| `prompts/system.py` | `SYSTEM_PROMPT` | 角色定位与硬约束（"不能做什么"） |
-| `prompts/assistant.py` | `ASSISTANT_PROMPT` | 人设、语气、输出风格（"以什么口吻回答"） |
-| `prompts/registry.py` | `PROMPTS` / `get_prompt()` / `compose_system_prompt()` | 按名字取提示词、多段拼接 |
-
-```python
-# 新增提示词：在 PromptKey 与 PROMPTS 各加一行即可
-from app.prompts import PromptKey, get_prompt
-
-extract_prompt = get_prompt(PromptKey.SYSTEM)
+```markdown
+---
+id: chat_system
+version: 1
+description: 对话场景的系统提示词（角色 / 约束 / 风格）
+---
+# 角色
+...
 ```
 
-链路里两段提示词由 `compose_system_prompt()` 合成一条 system 消息，客户端无法覆盖；`.env` 中同名变量可临时覆盖，留空则用代码内定义。
+| 文件 | 作用 |
+| --- | --- |
+| `prompts/files/chat_system.md` | 提示词正文 + `id` / `version` / `description` |
+| `prompts/loader.py` | 解析 front matter 并校验，不合法直接抛错 |
+| `prompts/registry.py` | 按 id 取用，按文件 mtime 判断是否重载 |
+
+三条硬规则（都在 `loader.py` 里强制执行）：
+
+1. **`id` 必须等于文件名** —— 否则改名之后引用就错位了。
+2. **`version` 必须是正整数** —— 版本是排障的锚点，不能写成 `v2`、`latest`。
+3. **正文不能为空** —— 空提示词会让模型行为完全失控。
+
+启动时加载失败会直接让进程起不来（快速失败）；运行期重载失败则**保留旧版本**并记 error 日志——宁可继续用旧提示词，也不能因为一次手误让线上进入"无提示词"状态。
+
+改提示词不用重启：
+
+```powershell
+# 1. 改 app/prompts/files/chat_system.md（顺手把 version +1）
+# 2. 下一次请求自动生效，可查证
+curl.exe http://127.0.0.1:8000/api/v1/chat/status
+# {"prompt_id":"chat_system","prompt_version":2,...}
+```
+
+**为什么带 version**：线上答歪了，你要能回答"这条请求用的是哪版提示词、哪个模型"。`/chat/status` 暴露当前版本，服务日志里每条对话都记 `prompt id / version / checksum`——这三个字段是事后回溯的唯一线索。
+
+**为什么合并成一条 system prompt**：之前拆成 `system` + `assistant` 两段再拼接，是生造的分类。业界按用途分（聊天/抽取/分类），一个聊天场景就是一条 system prompt，角色、约束、风格写在里面用标题分段。两段拼接的隐患是**指令冲突时谁赢不确定**——system 说"简洁"、assistant 说"展开讲"，模型行为会飘。
+
+新增提示词：放一个新 `.md` 到 `files/`，在 `registry.py` 的 `PromptKey` 加一行，然后 `PROMPT_CHAT_SYSTEM_ID` 指过去即可。
 
 ---
 

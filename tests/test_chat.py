@@ -116,11 +116,13 @@ def test_status(client: TestClient, stub_llm: Callable[..., Any]) -> None:
     response = client.get(f"{CHAT}/status")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "configured": False,
-        "model": "stub-model",
-        "base_url": "",
-    }
+    body = response.json()
+    assert body["configured"] is False
+    assert body["model"] == "stub-model"
+    assert body["base_url"] == ""
+    # 提示词版本要能被外部查到，排障时据此回溯
+    assert body["prompt_id"] == "chat_system"
+    assert body["prompt_version"] >= 1
 
 
 # ------------------------------------------------------------------ SSE 流式

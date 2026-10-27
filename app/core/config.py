@@ -7,7 +7,7 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.prompts import ASSISTANT_PROMPT, SYSTEM_PROMPT
+from app.prompts import PromptKey
 
 
 class Settings(BaseSettings):
@@ -50,9 +50,9 @@ class Settings(BaseSettings):
     LLM_MAX_RETRIES: int = 2
     LLM_TEMPERATURE: float = 0.7
 
-    # 提示词：默认取 app/prompts/ 下的定义，可用环境变量覆盖
-    LLM_SYSTEM_PROMPT: str = SYSTEM_PROMPT
-    LLM_ASSISTANT_PROMPT: str = ASSISTANT_PROMPT
+    # 提示词：配置里只存"用哪个 id"，正文由 app/prompts/files/*.md 提供。
+    # 这样切提示词变体（灰度/租户）只改环境变量，不必动代码。
+    PROMPT_CHAT_SYSTEM_ID: str = PromptKey.CHAT_SYSTEM.value
 
 
 @lru_cache(maxsize=1)
