@@ -93,9 +93,7 @@ def test_rejects_empty_body(tmp_path: Path) -> None:
 
 def test_rejects_non_numeric_version(tmp_path: Path) -> None:
     path = tmp_path / "chat_system.md"
-    path.write_text(
-        "---\nid: chat_system\nversion: v2\n---\n正文\n", encoding="utf-8"
-    )
+    path.write_text("---\nid: chat_system\nversion: v2\n---\n正文\n", encoding="utf-8")
 
     with pytest.raises(PromptConfigError, match="version 必须是正整数"):
         PromptRegistry(tmp_path)

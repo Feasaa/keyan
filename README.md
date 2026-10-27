@@ -54,7 +54,7 @@ sr/
 │   │   └── chat.py
 │   ├── services/               # 业务逻辑（≈ @Service）
 │   │   ├── exceptions.py       # 业务异常语义
-│   │   └── llm_service.py      # LangChain LCEL 链封装（invoke / astream）
+│   │   └── llm_service.py      # LangChain LCEL 链封装（invoke / astream_events）
 │   └── utils/                  # 通用工具（≈ common/util 包，当前为空）
 ├── tests/                      # 测试（≈ src/test/java）
 │   ├── conftest.py             # TestClient + LLM 桩夹具
@@ -104,7 +104,7 @@ HTTP → Starlette 路由匹配 → APIRouter（routes）
      → Depends 解析依赖 → Service → 上游 LLM 网关
 ```
 
-路径：`/api/v1/chat/stream` 由三段拼出来 —— `settings.API_PREFIX` + `router.py` 的 `prefix="/chat"` + 控制器里的 `"/stream"`。资源根路径只在一处定义，改名不会漏。
+路径：`/api/v1/chat/stream` 由三段拼出来 —— `settings.API_PREFIX` + `router.py` 的 `prefix="/chat"` + 路由模块里的 `"/stream"`。资源根路径只在一处定义，改名不会漏。
 
 ---
 
@@ -129,7 +129,7 @@ Spring 加了 `@RestController` 就被扫描到；FastAPI 必须在 `app/api/rou
 ### 3. 参数校验靠类型，不靠注解
 
 ```python
-message: str = Field(min_length=1)     # ≈ @NotBlank
+message: str = Field(min_length=1)  # ≈ @NotBlank
 history: list[ChatMessage] = Field(default_factory=list)  # ≈ @Size(max=20)
 ```
 
@@ -228,6 +228,7 @@ pytest
 | event | data | 说明 |
 | --- | --- | --- |
 | `delta` | `{"delta":"增量文本"}` | 模型增量输出，客户端顺序拼接即得完整回答 |
+| `meta` | `{"model":"...","prompt_tokens":157,"completion_tokens":4}` | 结束前给出实际模型与用量 |
 | `done` | `[DONE]` | 结束哨兵，收到后停止读取 |
 | `error` | `{"code":502,"message":"..."}` | 流中途失败。此时响应头已发出，只能靠事件传错误 |
 | 注释行 | `: ping - <时间>` | 心跳，空闲超过 `SSE_PING_SECONDS` 时发出，客户端忽略 |
@@ -236,15 +237,34 @@ pytest
 
 ```
 event: delta
-data: {"delta":"这是"}
+data: {"delta":"。"}
 
-event: delta
-data: {"delta":"五个"}
+event: meta
+data: {"model":"deepseek-flash","prompt_tokens":157,"completion_tokens":4}
 
 event: done
 data: [DONE]
 
 ```
+
+### 为什么用 astream_events 而不是 astream
+
+`astream()` 只给**最终输出的文本块**——链路中间发生了什么、这次用了多少 token，一概拿不到。`astream_events(version="v2")` 把链上每一跳都暴露成事件：
+
+| LangChain 事件 | 我们怎么用 |
+| --- | --- |
+| `on_chat_model_stream` | 取 `chunk.content` → `delta` 帧（空块丢弃） |
+| `on_chat_model_end` | 取 `usage_metadata` / `model_name` → `meta` 帧 |
+| `on_chain_*` / `on_parser_*` | 忽略（纯文本场景用不上） |
+
+换来的是：用量可统计、后续接工具调用/检索步骤时不用换协议。代价是**事件量更大**（每个 token 会有模型、解析器、子链三条事件），所以必须按 `event` 名过滤，只透传业务需要的部分——不能把 `astream_events` 的原始字典直接扔给客户端。
+
+实测发现的两个细节：
+
+- reasoning 类模型的 `on_chat_model_stream` 会大量出现 `content == ""`（推理增量不走 content），必须过滤空块，否则客户端收到一堆空帧。
+- 真正的文本在 `on_parser_stream` 里也有；我们取 `on_chat_model_stream`，是因为换掉解析器（结构化输出等）后它仍然有效。
+
+服务层不把 LangChain 的事件字典往上抛：`astream_chat()` 产出的是自己的 `TokenDelta` / `StreamFinished`，由路由映射成 SSE 帧。否则 LangChain 一升级，路由层跟着全改。
 
 ### SSE 为什么用 sse-starlette
 
@@ -299,7 +319,7 @@ prompt | model | parser
 - `model`：`ChatOpenAI`（OpenAI 兼容协议，可指向 DeepSeek / one-api 等网关）
 - `parser`：`StrOutputParser`，把 `AIMessage` 转成纯文本
 
-同一套链同时支持 `invoke()`（一次性）与 `astream()`（流式），换模型只改工厂一行。
+同一套链同时支持 `invoke()`（一次性）与 `astream_events()`（流式），换模型只改工厂一行。
 
 > system 用占位符而不是建链时写死，是为了让提示词可热更新：改文件不影响已建好的链和 httpx 连接池，下一次请求自动用新内容。
 

@@ -74,15 +74,11 @@ def load_prompt(path: Path) -> Prompt:
     if not prompt_id:
         raise PromptConfigError(f"{path.name} 缺少 id")
     if prompt_id != path.stem:
-        raise PromptConfigError(
-            f"{path.name} 的 id 必须与文件名一致（当前 id={prompt_id!r}）"
-        )
+        raise PromptConfigError(f"{path.name} 的 id 必须与文件名一致（当前 id={prompt_id!r}）")
 
     raw_version = meta.get("version", "")
     if not raw_version.isdigit() or int(raw_version) < 1:
-        raise PromptConfigError(
-            f"{path.name} 的 version 必须是正整数（当前 {raw_version!r}）"
-        )
+        raise PromptConfigError(f"{path.name} 的 version 必须是正整数（当前 {raw_version!r}）")
 
     text = body.strip()
     if not text:

@@ -1,6 +1,6 @@
 """pytest 公共夹具：客户端 + LLM 桩（成功/失败两种）。
 
-桩只实现被调用到的方法（invoke / astream），与 LCEL 链同构，
+桩只实现被调用到的方法（invoke / astream_events），与 LCEL 链同构，
 通过 dependency_overrides 注入，生产代码零改动。
 """
 
@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage, AIMessageChunk
 
 from app.core.config import get_settings
 from app.main import app
@@ -16,7 +17,7 @@ from app.services.llm_service import LLMService, get_llm_service
 
 
 class StubChain:
-    """逐字产出的桩链。"""
+    """逐字产出的桩链，事件结构与 LangChain 的 astream_events 一致。"""
 
     def __init__(self, answer: str = "这是桩回答") -> None:
         self.answer = answer
@@ -26,10 +27,30 @@ class StubChain:
         self.calls.append(inputs)
         return self.answer
 
-    async def astream(self, inputs: dict[str, Any]) -> AsyncIterator[str]:
+    async def astream_events(
+        self, inputs: dict[str, Any], version: str = "v2"
+    ) -> AsyncIterator[dict[str, Any]]:
         self.calls.append(inputs)
         for piece in self.answer:
-            yield piece
+            yield {
+                "event": "on_chat_model_stream",
+                "name": "ChatOpenAI",
+                "data": {"chunk": AIMessageChunk(content=piece)},
+            }
+        yield {
+            "event": "on_chat_model_end",
+            "name": "ChatOpenAI",
+            "data": {
+                "output": AIMessage(
+                    content=self.answer,
+                    usage_metadata={
+                        "input_tokens": 11,
+                        "output_tokens": 22,
+                        "total_tokens": 33,
+                    },
+                )
+            },
+        }
 
 
 class ExplodingChain:
@@ -41,8 +62,11 @@ class ExplodingChain:
     def invoke(self, inputs: dict[str, Any]) -> str:
         raise self.exc
 
-    async def astream(self, inputs: dict[str, Any]) -> AsyncIterator[str]:
-        yield ""  # 空块会被服务层过滤，等价于"还没产出就失败"
+    async def astream_events(
+        self, inputs: dict[str, Any], version: str = "v2"
+    ) -> AsyncIterator[dict[str, Any]]:
+        # 空块会被服务层过滤，等价于"还没产出就失败"
+        yield {"event": "on_chat_model_stream", "data": {"chunk": AIMessageChunk(content="")}}
         raise self.exc
 
 

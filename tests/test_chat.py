@@ -78,9 +78,7 @@ def test_chat_rejects_system_role(client: TestClient, stub_llm: Callable[..., An
     assert response.status_code == 422
 
 
-def test_chat_rejects_empty_message(
-    client: TestClient, stub_llm: Callable[..., Any]
-) -> None:
+def test_chat_rejects_empty_message(client: TestClient, stub_llm: Callable[..., Any]) -> None:
     stub_llm()
 
     response = client.post(CHAT, json={"message": ""})
@@ -131,9 +129,7 @@ def test_status(client: TestClient, stub_llm: Callable[..., Any]) -> None:
 # ------------------------------------------------------------------ SSE 流式
 
 
-def test_stream_emits_delta_frames(
-    client: TestClient, stub_llm: Callable[..., Any]
-) -> None:
+def test_stream_emits_delta_frames(client: TestClient, stub_llm: Callable[..., Any]) -> None:
     """逐块返回 delta，最后以 [DONE] 结束。"""
     stub_llm(answer="你好世界")
 
@@ -149,9 +145,21 @@ def test_stream_emits_delta_frames(
     assert frames[-1] == ("done", "[DONE]")
 
 
-def test_stream_passes_history(
-    client: TestClient, stub_llm: Callable[..., Any]
-) -> None:
+def test_stream_emits_meta_with_usage(client: TestClient, stub_llm: Callable[..., Any]) -> None:
+    """结束前给出模型与用量：astream_events 才能拿到这些，astream 拿不到。"""
+    stub_llm(answer="好")
+
+    with client.stream("POST", STREAM, json={"message": "你好"}) as response:
+        body = "".join(response.iter_text())
+
+    frames = parse_sse(body)
+    metas = [json.loads(data) for event, data in frames if event == "meta"]
+    assert metas == [{"model": "stub-model", "prompt_tokens": 11, "completion_tokens": 22}]
+    # meta 必须在 done 之前，客户端才来得及处理
+    assert [event for event, _ in frames][-2:] == ["meta", "done"]
+
+
+def test_stream_passes_history(client: TestClient, stub_llm: Callable[..., Any]) -> None:
     stub = stub_llm(answer="ok")
 
     with client.stream(
@@ -198,9 +206,7 @@ def test_stream_upstream_error_emits_error_event(
     assert ("done", "[DONE]") not in frames
 
 
-def test_health_unaffected_by_llm(
-    client: TestClient, stub_llm: Callable[..., Any]
-) -> None:
+def test_health_unaffected_by_llm(client: TestClient, stub_llm: Callable[..., Any]) -> None:
     """降级不影响主服务：LLM 关闭时存活探针照常 200。"""
     stub_llm(configured=False)
 

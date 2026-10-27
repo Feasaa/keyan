@@ -14,20 +14,26 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sse_starlette import EventSourceResponse, JSONServerSentEvent, ServerSentEvent
 
 from app.core.config import Settings, get_settings
-from app.core.sse import EVENT_DELTA, EVENT_DONE, EVENT_ERROR, SSE_DONE
+from app.core.sse import EVENT_DELTA, EVENT_DONE, EVENT_ERROR, EVENT_META, SSE_DONE
 from app.schemas.chat import (
     ChatRequest,
     ChatResponse,
     ChatStatusResponse,
     StreamChunk,
     StreamError,
+    StreamMeta,
 )
 from app.services.exceptions import (
     LLMNotConfiguredError,
     LLMUpstreamError,
     ServiceError,
 )
-from app.services.llm_service import LLMService, get_llm_service
+from app.services.llm_service import (
+    LLMService,
+    StreamFinished,
+    TokenDelta,
+    get_llm_service,
+)
 
 router = APIRouter()
 
@@ -111,21 +117,22 @@ async def _event_source(
     payload: ChatRequest,
 ) -> AsyncIterator[ServerSentEvent]:
     try:
-        async for delta in service.astream_chat(payload):
-            # 用 JSONServerSentEvent：普通 ServerSentEvent 对 dict 走 str()，
-            # 会产出单引号的 Python repr，客户端 JSON.parse 直接失败
-            yield JSONServerSentEvent(
-                data=StreamChunk(delta=delta).model_dump(), event=EVENT_DELTA
-            )
+        async for item in service.astream_chat(payload):
+            if isinstance(item, TokenDelta):
+                # 用 JSONServerSentEvent：普通 ServerSentEvent 对 dict 走 str()，
+                # 会产出单引号的 Python repr，客户端 JSON.parse 直接失败
+                yield JSONServerSentEvent(
+                    data=StreamChunk(delta=item.text).model_dump(), event=EVENT_DELTA
+                )
+            else:
+                yield JSONServerSentEvent(data=_meta(item).model_dump(), event=EVENT_META)
         yield ServerSentEvent(data=SSE_DONE, event=EVENT_DONE)
     except asyncio.CancelledError:
         # 客户端断开：静默结束，不再写任何帧
         raise
     except LLMUpstreamError as exc:
         yield JSONServerSentEvent(
-            data=StreamError(
-                code=status.HTTP_502_BAD_GATEWAY, message=str(exc)
-            ).model_dump(),
+            data=StreamError(code=status.HTTP_502_BAD_GATEWAY, message=str(exc)).model_dump(),
             event=EVENT_ERROR,
         )
     except ServiceError:
@@ -135,6 +142,14 @@ async def _event_source(
             ).model_dump(),
             event=EVENT_ERROR,
         )
+
+
+def _meta(finished: StreamFinished) -> StreamMeta:
+    return StreamMeta(
+        model=finished.model,
+        prompt_tokens=finished.prompt_tokens,
+        completion_tokens=finished.completion_tokens,
+    )
 
 
 @router.get(

@@ -65,6 +65,14 @@ class StreamChunk(BaseModel):
     delta: str = Field(..., description="本次增量文本")
 
 
+class StreamMeta(BaseModel):
+    """SSE 元信息帧：event=meta。结束前一次性给出，供客户端统计用量。"""
+
+    model: str = Field(..., description="实际使用的模型名", examples=["deepseek-chat"])
+    prompt_tokens: int | None = Field(None, description="输入令牌数（网关不返回时为空）")
+    completion_tokens: int | None = Field(None, description="输出令牌数（网关不返回时为空）")
+
+
 class StreamError(BaseModel):
     """SSE 错误帧：event=error。流已开始后无法再改 HTTP 状态码，只能靠事件传递。"""
 

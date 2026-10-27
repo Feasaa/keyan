@@ -30,9 +30,7 @@ class PromptRegistry:
         self._mtimes = self._snapshot()
 
     def _snapshot(self) -> dict[Path, float]:
-        return {
-            path: path.stat().st_mtime for path in sorted(self._directory.glob("*.md"))
-        }
+        return {path: path.stat().st_mtime for path in sorted(self._directory.glob("*.md"))}
 
     def _refresh(self) -> None:
         current = self._snapshot()
@@ -48,9 +46,7 @@ class PromptRegistry:
             return
         self._prompts = prompts
         self._mtimes = current
-        logger.info(
-            "提示词已重载：%s", {pid: p.version for pid, p in prompts.items()}
-        )
+        logger.info("提示词已重载：%s", {pid: p.version for pid, p in prompts.items()})
 
     def get(self, key: PromptKey | str) -> Prompt:
         self._refresh()
@@ -59,9 +55,7 @@ class PromptRegistry:
             return self._prompts[prompt_id]
         except KeyError:
             available = ", ".join(sorted(self._prompts))
-            raise PromptConfigError(
-                f"未找到提示词 {prompt_id!r}，可用：{available}"
-            ) from None
+            raise PromptConfigError(f"未找到提示词 {prompt_id!r}，可用：{available}") from None
 
     def versions(self) -> dict[str, int]:
         self._refresh()

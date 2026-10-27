@@ -9,7 +9,9 @@
 
 import logging
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from functools import lru_cache
+from typing import Any
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -22,6 +24,26 @@ from app.schemas.chat import ChatRequest
 from app.services.exceptions import LLMNotConfiguredError, LLMUpstreamError
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TokenDelta:
+    """一段增量文本。"""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class StreamFinished:
+    """流结束时的元信息：实际模型与令牌用量。"""
+
+    model: str
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+
+
+# 服务层对外的流式事件：路由层据此映射成 SSE 帧，不暴露 LangChain 的事件字典
+StreamEvent = TokenDelta | StreamFinished
 
 
 class LLMService:
@@ -100,8 +122,15 @@ class LLMService:
             raise LLMUpstreamError(type(exc).__name__) from exc
         return answer, self.model
 
-    async def astream_chat(self, payload: ChatRequest) -> AsyncIterator[str]:
-        """流式产出增量文本（LCEL 的 astream 逐块返回）。
+    async def astream_chat(self, payload: ChatRequest) -> AsyncIterator[StreamEvent]:
+        """流式产出结构化事件（基于 astream_events）。
+
+        为什么用 astream_events 而不是 astream：
+            astream 只给最终输出的文本块，拿不到中间过程与元信息。
+            astream_events 能拿到链上每一跳（模型 / 解析器 / 子链）的事件，
+            这是后续接工具调用、检索步骤、用量统计的唯一入口。
+            代价是事件量更大（每个 token 会有多条事件），所以必须按
+            event 名过滤，且只透传业务需要的部分。
 
         上游异常在流中途才可能出现，此时响应头已下发，只能由路由层转成 error 事件。
         """
@@ -119,11 +148,44 @@ class LLMService:
             prompt.checksum,
         )
         try:
-            async for chunk in chain.astream(self._chain_inputs(payload, prompt)):
-                if chunk:
-                    yield chunk
+            async for event in chain.astream_events(
+                self._chain_inputs(payload, prompt), version="v2"
+            ):
+                kind = event["event"]
+                if kind == "on_chat_model_stream":
+                    text = _chunk_text(event["data"].get("chunk"))
+                    if text:
+                        yield TokenDelta(text)
+                elif kind == "on_chat_model_end":
+                    yield _finished(self.model, event["data"].get("output"))
         except Exception as exc:
             raise LLMUpstreamError(type(exc).__name__) from exc
+
+
+def _chunk_text(chunk: Any) -> str:
+    """从模型块里取文本。
+
+    content 可能是 str（纯文本）或 list（多模态分段），空块要丢掉 ——
+    reasoning 类模型的推理增量也会产生 content 为空的事件。
+    """
+    content = getattr(chunk, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part) for part in content
+        )
+    return ""
+
+
+def _finished(model: str, output: Any) -> StreamFinished:
+    usage = getattr(output, "usage_metadata", None) or {}
+    metadata = getattr(output, "response_metadata", None) or {}
+    return StreamFinished(
+        model=metadata.get("model_name", model),
+        prompt_tokens=usage.get("input_tokens"),
+        completion_tokens=usage.get("output_tokens"),
+    )
 
 
 @lru_cache(maxsize=1)

@@ -13,5 +13,6 @@ SSE_DONE = "[DONE]"
 
 # 流内事件名：客户端按 event 分流处理
 EVENT_DELTA = "delta"
+EVENT_META = "meta"
 EVENT_DONE = "done"
 EVENT_ERROR = "error"
