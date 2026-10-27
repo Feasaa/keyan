@@ -38,8 +38,8 @@ class Settings(BaseSettings):
     HOST: str = "127.0.0.1"
     PORT: int = 8000
 
-    # SSE：无数据时的心跳间隔（秒）。要小于网关/负载均衡的空闲超时（常见 60s）
-    SSE_HEARTBEAT_SECONDS: float = 15.0
+    # SSE：ping 注释的间隔（秒）。要小于网关/负载均衡的空闲超时（常见 60s）
+    SSE_PING_SECONDS: float = 15.0
 
     # LLM（LangChain，OpenAI 兼容网关）
     # 密钥为空 = 功能关闭，服务照常启动，/api/v1/chat/* 返回 503

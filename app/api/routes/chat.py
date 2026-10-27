@@ -4,16 +4,17 @@
 SSE 有两种错误通道：
     流开始前 → HTTPException（客户端拿到真实的 503）
     流开始后 → event=error 帧（响应头已发出，无法再改状态码）
+帧编码、ping 心跳、断线取消、停机收尾都由 sse-starlette 处理。
 """
 
 import asyncio
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sse_starlette import EventSourceResponse, JSONServerSentEvent, ServerSentEvent
 
 from app.core.config import Settings, get_settings
-from app.core.sse import SSE_DONE, format_event, with_heartbeat
+from app.core.sse import EVENT_DELTA, EVENT_DONE, EVENT_ERROR, SSE_DONE
 from app.schemas.chat import (
     ChatRequest,
     ChatResponse,
@@ -29,13 +30,6 @@ from app.services.exceptions import (
 from app.services.llm_service import LLMService, get_llm_service
 
 router = APIRouter()
-
-# 关闭各级代理缓冲，否则 SSE 会被攒成整块再下发，流式效果消失
-SSE_HEADERS = {
-    "Cache-Control": "no-cache, no-transform",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no",
-}
 
 
 def _ensure_configured(service: LLMService) -> None:
@@ -87,7 +81,7 @@ async def chat(
         "以 text/event-stream 逐块返回：event=delta 为增量文本，"
         "event=done 携带 [DONE] 表示结束，event=error 携带错误码。"
     ),
-    response_class=StreamingResponse,
+    response_class=EventSourceResponse,
     responses={
         200: {"content": {"text/event-stream": {}}, "description": "SSE 事件流"},
         422: {"description": "参数校验失败"},
@@ -95,47 +89,51 @@ async def chat(
     },
 )
 async def chat_stream(
+    request: Request,
     payload: ChatRequest,
     service: LLMService = Depends(get_llm_service),
     settings: Settings = Depends(get_settings),
-) -> StreamingResponse:
+) -> EventSourceResponse:
     # 配置缺失属于请求前置条件，必须在响应头下发前拦掉
     _ensure_configured(service)
 
-    return StreamingResponse(
-        _event_source(service, payload, settings.SSE_HEARTBEAT_SECONDS),
-        media_type="text/event-stream",
-        headers=SSE_HEADERS,
+    return EventSourceResponse(
+        _event_source(service, payload),
+        # ping 是 SSE 注释行，客户端忽略；用来防住代理的空闲超时
+        ping=settings.SSE_PING_SECONDS,
+        # 停机时通知在途流收尾，而不是被进程退出硬切断
+        shutdown_event=getattr(request.app.state, "sse_shutdown", None),
     )
 
 
 async def _event_source(
     service: LLMService,
     payload: ChatRequest,
-    heartbeat_seconds: float,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[ServerSentEvent]:
     try:
-        async for delta in with_heartbeat(
-            service.astream_chat(payload), heartbeat_seconds
-        ):
-            yield format_event(StreamChunk(delta=delta).model_dump(), event="delta")
-        yield format_event(SSE_DONE, event="done")
+        async for delta in service.astream_chat(payload):
+            # 用 JSONServerSentEvent：普通 ServerSentEvent 对 dict 走 str()，
+            # 会产出单引号的 Python repr，客户端 JSON.parse 直接失败
+            yield JSONServerSentEvent(
+                data=StreamChunk(delta=delta).model_dump(), event=EVENT_DELTA
+            )
+        yield ServerSentEvent(data=SSE_DONE, event=EVENT_DONE)
     except asyncio.CancelledError:
         # 客户端断开：静默结束，不再写任何帧
         raise
     except LLMUpstreamError as exc:
-        yield format_event(
-            StreamError(
+        yield JSONServerSentEvent(
+            data=StreamError(
                 code=status.HTTP_502_BAD_GATEWAY, message=str(exc)
             ).model_dump(),
-            event="error",
+            event=EVENT_ERROR,
         )
     except ServiceError:
-        yield format_event(
-            StreamError(
+        yield JSONServerSentEvent(
+            data=StreamError(
                 code=status.HTTP_502_BAD_GATEWAY, message="LLM 服务内部异常"
             ).model_dump(),
-            event="error",
+            event=EVENT_ERROR,
         )
 
 

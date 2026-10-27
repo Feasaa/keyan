@@ -4,6 +4,9 @@ uvicorn[standard]>=0.30
 pydantic-settings>=2.4
 python-dotenv>=1.0
 
+# SSE（帧编码 / ping / 断线检测 / 优雅停机）
+sse-starlette>=3.6
+
 # LLM（LangChain，OpenAI 兼容网关）
 langchain>=1.4
 langchain-openai>=1.7

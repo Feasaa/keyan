@@ -6,6 +6,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import anyio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -15,8 +16,14 @@ from app.core.config import settings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """启动时申请昂贵资源（连接池、缓存预热），关闭时释放。"""
+    """启动时申请昂贵资源；关闭时先通知在途 SSE 流收尾，再释放资源。
+
+    sse_shutdown 由 EventSourceResponse 消费：收到 set 后，进行中的流会
+    发一个 shutdown 事件并主动关闭连接，而不是被进程退出硬切断。
+    """
+    app.state.sse_shutdown = anyio.Event()
     yield
+    app.state.sse_shutdown.set()
 
 
 def create_app() -> FastAPI:

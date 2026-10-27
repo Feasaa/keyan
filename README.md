@@ -38,7 +38,7 @@ sr/
 │   ├── main.py                 # 入口：应用工厂 + 生命周期 + 中间件 + 挂路由
 │   ├── core/                   # 基础设施：配置、SSE 工具（与业务无关）
 │   │   ├── config.py           # 全局配置（≈ application.yml + @ConfigurationProperties）
-│   │   └── sse.py              # SSE 编码 + 心跳（与具体业务解耦，可复用）
+│   │   └── sse.py              # SSE 事件名与结束哨兵（帧编码交给 sse-starlette）
 │   ├── prompts/                # 提示词（正文是文件，不是代码常量）
 │   │   ├── files/chat_system.md  # 提示词正文 + 元数据（id / version / description）
 │   │   ├── loader.py           # 加载与校验（不合法启动即失败）
@@ -227,30 +227,43 @@ pytest
 
 | event | data | 说明 |
 | --- | --- | --- |
-| `delta` | `{"delta": "增量文本"}` | 模型增量输出，客户端顺序拼接即得完整回答 |
+| `delta` | `{"delta":"增量文本"}` | 模型增量输出，客户端顺序拼接即得完整回答 |
 | `done` | `[DONE]` | 结束哨兵，收到后停止读取 |
-| `error` | `{"code": 502, "message": "..."}` | 流中途失败。此时响应头已发出，只能靠事件传错误 |
-| 注释行 | `: keep-alive` | 心跳，空闲超过 `SSE_HEARTBEAT_SECONDS` 时发出，客户端忽略 |
+| `error` | `{"code":502,"message":"..."}` | 流中途失败。此时响应头已发出，只能靠事件传错误 |
+| 注释行 | `: ping - <时间>` | 心跳，空闲超过 `SSE_PING_SECONDS` 时发出，客户端忽略 |
 
 实测报文：
 
 ```
 event: delta
-data: {"delta": "你好"}
+data: {"delta":"这是"}
 
 event: delta
-data: {"delta": "，"}
+data: {"delta":"五个"}
 
 event: done
 data: [DONE]
 
 ```
 
-三个容易踩的工业级细节：
+### SSE 为什么用 sse-starlette
 
-1. **响应头必须关掉缓冲**：`X-Accel-Buffering: no` + `Cache-Control: no-cache, no-transform`，否则 Nginx 会把整条流攒完再下发，流式效果消失。
+FastAPI / Starlette 内置只有通用的 `StreamingResponse`，**没有 SSE 语义**（`starlette.responses` 里没有任何 EventSource 类）。SSE 的帧编码、ping 心跳、断线取消、停机收尾都是协议层通用问题，交给 `sse-starlette` 的 `EventSourceResponse`：
+
+| 能力 | 谁负责 |
+| --- | --- |
+| 帧编码、多行 `data:` 拆分 | `sse-starlette` |
+| ping 心跳（`ping=` 参数） | `sse-starlette` |
+| 客户端断线检测与取消 | `sse-starlette` |
+| 停机时通知在途流收尾（`shutdown_event`） | `sse-starlette` + `main.py` 的 lifespan |
+| 响应头（`Cache-Control: no-store`、`X-Accel-Buffering: no`） | `sse-starlette` |
+| 事件命名（`delta`/`done`/`error`）、错误分通道 | 本项目（`core/sse.py` + 路由） |
+
+三个容易踩的细节：
+
+1. **dict 必须用 `JSONServerSentEvent`**：普通的 `ServerSentEvent` 对 dict 走 `str()`，会产出 `data: {'code': 502}` 这种单引号 Python repr，客户端 `JSON.parse` 直接失败。这个坑只有把报文打出来看才会发现。
 2. **错误有两个通道**：配置缺失这类前置条件在响应头下发前抛 `HTTPException`，客户端拿到真实的 503；而流开始后的上游故障只能发 `event=error`，此时 HTTP 状态码已经是 200，改不了。
-3. **心跳不能靠取消上游**：直接对 `__anext__` 做超时取消会让异步生成器进入不可恢复状态。`core/sse.py` 用独立生产者任务 + 有界队列（背压）实现，消费者只对 `queue.get()` 超时。
+3. **停机要能收尾**：`main.py` 的 lifespan 在关闭时 `set()` 一个 `anyio.Event` 并传给 `EventSourceResponse`，在途的流会收到通知后主动结束，而不是被进程退出硬切断——否则客户端只看到连接莫名断开。
 
 ### 健康检查（/api/v1/health）
 
@@ -263,7 +276,7 @@ data: [DONE]
 
 ### 配置（.env）
 
-`LLM_API_KEY`（不填 = 功能关闭，主服务不受影响）、`LLM_BASE_URL`（OpenAI 兼容网关）、`LLM_MODEL`、`LLM_TIMEOUT_SECONDS`、`LLM_MAX_RETRIES`、`LLM_TEMPERATURE`、`SSE_HEARTBEAT_SECONDS`、`PROMPT_CHAT_SYSTEM_ID`（用哪份提示词）。提示词正文不在配置里，在 `app/prompts/files/*.md`。
+`LLM_API_KEY`（不填 = 功能关闭，主服务不受影响）、`LLM_BASE_URL`（OpenAI 兼容网关）、`LLM_MODEL`、`LLM_TIMEOUT_SECONDS`、`LLM_MAX_RETRIES`、`LLM_TEMPERATURE`、`SSE_PING_SECONDS`、`PROMPT_CHAT_SYSTEM_ID`（用哪份提示词）。提示词正文不在配置里，在 `app/prompts/files/*.md`。
 
 安全要点：历史消息 role 白名单只允许 `user`/`assistant` —— 客户端伪造 `system` 角色会被 422 拦截（防提示注入）；系统提示词仅由服务端配置注入。
 

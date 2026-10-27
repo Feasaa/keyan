@@ -12,8 +12,8 @@ PORT=8000
 CORS_ORIGINS=["http://localhost:5173","http://127.0.0.1:5173"]
 
 # ---- SSE ----
-# 空闲心跳间隔（秒），需小于网关/负载均衡的空闲超时（常见 60s）
-SSE_HEARTBEAT_SECONDS=15
+# ping 注释间隔（秒），需小于网关/负载均衡的空闲超时（常见 60s）
+SSE_PING_SECONDS=15
 
 # ---- LLM（LangChain，OpenAI 兼容网关）----
 # 不配置密钥 = 功能关闭：服务照常启动，/api/v1/chat/* 返回 503

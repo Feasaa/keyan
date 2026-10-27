@@ -11,9 +11,12 @@ STREAM = "/api/v1/chat/stream"
 
 
 def parse_sse(body: str) -> list[tuple[str | None, str]]:
-    """把 SSE 报文解析成 (event, data) 列表；注释行（心跳）丢弃。"""
+    """把 SSE 报文解析成 (event, data) 列表；注释行（ping）丢弃。
+
+    sse-starlette 用 CRLF 分隔帧，先归一化再按空行切。
+    """
     frames: list[tuple[str | None, str]] = []
-    for block in body.split("\n\n"):
+    for block in body.replace("\r\n", "\n").split("\n\n"):
         event: str | None = None
         data: list[str] = []
         for line in block.splitlines():
@@ -190,7 +193,7 @@ def test_stream_upstream_error_emits_error_event(
     frames = parse_sse(body)
     errors = [data for event, data in frames if event == "error"]
     assert len(errors) == 1
-    assert '"code": 502' in errors[0]
+    assert '"code":502' in errors[0]
     assert "sk-secret-leak" not in errors[0]
     assert ("done", "[DONE]") not in frames
 
