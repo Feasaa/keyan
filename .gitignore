@@ -1,0 +1,33 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- 环境变量 ----
+.env
+
+# ---- 测试与工具缓存 ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- IDE ----
+.idea/
+.vscode/
+*.swp
+
+# ---- 数据库/日志 ----
+*.db
+*.sqlite3
+*.log
+logs/

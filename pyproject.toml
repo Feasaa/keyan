@@ -1,0 +1,23 @@
+[project]
+name = "learn-fastapi"
+version = "0.1.0"
+description = "FastAPI 学习项目骨架"
+requires-python = ">=3.11"
+
+# 依赖统一维护在 environment.yml / requirements.txt
+
+[tool.pytest.ini_options]
+# 让 pytest 从项目根目录导入 app 包
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# B008（默认值里调用函数）与 FastAPI 的 Depends(...) 惯用写法冲突，
+# 这是 FastAPI 官方推荐的依赖注入位置，属已知误报，工业项目惯例是忽略。
+extend-ignore = ["B008"]
