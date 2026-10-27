@@ -12,8 +12,8 @@ FastAPI + LangChain 的分层服务骨架。分层方式刻意对齐 Spring Boot
 | --- | --- | --- |
 | `DemoApplication.java`（`@SpringBootApplication`） | `app/main.py` 的 `create_app()` | 装配应用：中间件、路由、生命周期 |
 | `SpringApplication.run(...)` | `app = create_app()` | 启动入口 |
-| `@RestController` | `app/controllers/*.py` 里的 `router` | 暴露 HTTP 接口 |
-| `@RequestMapping("/api/v1")` | `settings.API_PREFIX` + `app/router.py` | 统一前缀与版本分组 |
+| `@RestController` | `app/api/routes/*.py` 里的 `router` | 暴露 HTTP 接口 |
+| `@RequestMapping("/api/v1")` | `settings.API_PREFIX` + `api/router.py` | 统一前缀与版本分组 |
 | 组件扫描（自动注册 Controller） | `include_router(...)`（**必须手写**） | 把路由接进应用 |
 | `@Service` | `app/services/*.py` | 业务逻辑 |
 | `@Autowired` | `Depends(get_x)` | 依赖注入 |
@@ -43,10 +43,12 @@ sr/
 │   │   ├── system.py           # 系统提示词：角色与硬约束
 │   │   ├── assistant.py        # 助理提示词：人设与语气
 │   │   └── registry.py         # 按名字取提示词 + 拼接工具
-│   ├── controllers/            # 控制器（≈ controller 包）
-│   │   ├── health.py           # 存活探针 + 就绪探针
-│   │   └── chat.py             # 一次性对话 + SSE 流式对话 + 状态
-│   ├── router.py               # 路由聚合（≈ 组件扫描的"手写替代品"）
+│   ├── api/                    # 接口层（FastAPI 惯例）
+│   │   ├── __init__.py         # 只导出 api_router
+│   │   ├── router.py           # 路由聚合（≈ 组件扫描的"手写替代品"）
+│   │   └── routes/             # 一个资源一个文件
+│   │       ├── health.py       # 存活探针 + 就绪探针
+│   │       └── chat.py         # 一次性对话 + SSE 流式对话 + 状态
 │   ├── schemas/                # 接口契约 DTO（≈ dto/vo 包）
 │   │   ├── health.py
 │   │   └── chat.py
@@ -72,9 +74,11 @@ sr/
 
 **`app/core/`** — 配置、日志、安全、异常处理这些东西每个项目都要，但不属于任何业务。混在业务包里会导致：换环境时要全局搜索改代码；想复用到下一个项目得连业务一起搬。所以单独成层，业务只"使用"它。
 
-**`app/controllers/`** — 只做 HTTP 协议转换：收参数 → 调 service → 返回。**禁止写业务规则**，因为同一段业务还要被定时任务、消息消费者调用，写在接口层就被绑死在 HTTP 上。对应 Spring 里"Controller 不写业务"的铁律。
+**`app/api/`** — 只做 HTTP 协议转换：收参数 → 调 service → 返回。**禁止写业务规则**，因为同一段业务还要被定时任务、消息消费者调用，写在接口层就被绑死在 HTTP 上。对应 Spring 里"Controller 不写业务"的铁律。
 
-**版本号只留在 URL 里** — `/api/v1` 是**对外契约**，不兼容变更只能 v1、v2 并存；但它不该用目录嵌套表达。目录结构属于内部实现，哪天把 `controllers/` 拆成 `controllers/admin/`、`controllers/open/`，URL 不该跟着变。所以这里是 `controllers/chat.py` + `API_PREFIX=/api/v1`，而不是 `api/v1/endpoints/chat.py`。
+**为什么叫 `api/routes/` 而不是 `controllers/`** — 这是 FastAPI 生态的命名惯例（官方教程用 `routers/`，官方模板用 `api/routes/`），`controllers` 是 Java/Spring 的词。跟着生态走，别人接手时不用先猜你的目录约定。
+
+**版本号只留在 URL 里** — `/api/v1` 是**对外契约**，不兼容变更只能 v1、v2 并存；但它不该用目录嵌套表达。目录结构属于内部实现，哪天把 `routes/` 拆成 `routes/admin/`、`routes/open/`，URL 不该跟着变。所以这里是 `api/routes/chat.py` + `API_PREFIX=/api/v1`，而不是 `api/v1/endpoints/chat.py`。
 
 **`app/schemas/`** — 出入参契约。独立于任何存储结构：接口返回常常是拼装结果，且内部字段（密钥、审计字段）绝不能返回给前端。对应 Spring 的 DTO/VO 分层。
 
@@ -96,7 +100,7 @@ HTTP → DispatcherServlet → HandlerMapping → Controller
 FastAPI：
 
 ```
-HTTP → Starlette 路由匹配 → APIRouter（controllers）
+HTTP → Starlette 路由匹配 → APIRouter（routes）
      → Depends 解析依赖 → Service → 上游 LLM 网关
 ```
 
@@ -108,7 +112,7 @@ HTTP → Starlette 路由匹配 → APIRouter（controllers）
 
 ### 1. 路由不会自动注册
 
-Spring 加了 `@RestController` 就被扫描到；FastAPI 必须在 `app/router.py` 里显式 `include_router`，再在 `main.py` 里挂一次。**漏写就是 404**，而且不报错。这是从 Spring 转过来最容易踩的坑。
+Spring 加了 `@RestController` 就被扫描到；FastAPI 必须在 `app/api/router.py` 里显式 `include_router`，再在 `main.py` 里挂一次。**漏写就是 404**，而且不报错。这是从 Spring 转过来最容易踩的坑。
 
 ### 2. 依赖注入的时机不同
 
@@ -134,6 +138,23 @@ Spring 要写 `@GetMapping @PathVariable @Valid @RequestBody @Operation @ApiResp
 ### 4. 异常处理
 
 service 层**不抛 HTTP 异常**，只抛业务异常（`LLMNotConfiguredError` / `LLMUpstreamError`）；由接口层翻译成 `503` / `502`。原因：service 不该知道 HTTP 语义，否则换框架就要重写业务。这对应 Spring 里"Service 抛业务异常，由 `@ControllerAdvice` 统一映射成状态码"的分工。
+
+### 5. Java 习惯 → Python 规范（迁移对照）
+
+Java 背景最容易带过来的几个习惯，在这里都是反例：
+
+| Java 习惯 | Python / FastAPI 规范 | 为什么 |
+| --- | --- | --- |
+| `controller/UserController.java` | `api/routes/users.py` | 一个资源一个模块，不加 `Controller` 后缀 |
+| `IUserService` + `UserServiceImpl` | `services/user_service.py` 单个模块 | 不做接口/实现分离，鸭子类型 + 需要时才用 `Protocol` |
+| `UserDTO` / `UserVO` / `UserRequest` | `schemas/user.py` 里的 `UserCreate` / `UserRead` | 按**用途**命名，不按分层命名 |
+| 包名全小写、无分隔 | 模块 `snake_case`，类 `CamelCase` | PEP 8；文件名即 import 路径 |
+| `static final int MAX = 20` | 模块级 `MAX_RETRIES = 20` | 没有真正的常量，靠命名约定 |
+| 构造器注入 `@Autowired` | 函数参数 `Depends(...)` | 依赖声明在签名上，随请求解析 |
+| `application.yml` + profile | `.env` + pydantic-settings | 环境变量优先 |
+| `getUserId()` / `setUserId()` | 直接 `user.id` | 不用写 getter/setter，需要时用 `@property` |
+
+判断标准只有一条：**跟着生态的写法走，别把 Java 的命名习惯翻译成 Python**。别人接手时不该先猜你的目录约定。
 
 ---
 

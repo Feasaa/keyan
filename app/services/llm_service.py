@@ -1,7 +1,7 @@
 """LLM 服务：LangChain LCEL 链（prompt | model | parser）的封装。
 
 客户端是进程级单例：内部持有 httpx 连接池，每请求新建会导致连接风暴。
-未配置密钥时不构建链，调用方拿到 LLMNotConfiguredError，由控制器映射 503。
+未配置密钥时不构建链，调用方拿到 LLMNotConfiguredError，由路由层映射 503。
 """
 
 from collections.abc import AsyncIterator
@@ -86,7 +86,7 @@ class LLMService:
     async def astream_chat(self, payload: ChatRequest) -> AsyncIterator[str]:
         """流式产出增量文本（LCEL 的 astream 逐块返回）。
 
-        上游异常在流中途才可能出现，此时响应头已下发，只能由控制器转成 error 事件。
+        上游异常在流中途才可能出现，此时响应头已下发，只能由路由层转成 error 事件。
         """
         self.ensure_configured()
         chain = self._chain

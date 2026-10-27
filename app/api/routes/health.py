@@ -1,4 +1,4 @@
-"""健康检查控制器：存活探针（liveness）与就绪探针（readiness）。
+"""健康检查端点：存活探针（liveness）与就绪探针（readiness）。
 
 两个探针分开，是因为它们的失败语义不同：
     liveness  失败 → 编排系统重启容器

@@ -46,7 +46,7 @@ class ExplodingChain:
 
 
 def _make_service(chain: Any, configured: bool) -> LLMService:
-    """绕过 __init__ 构造服务实例，只填控制器会读的字段。"""
+    """绕过 __init__ 构造服务实例，只填路由层会读的字段。"""
     service = LLMService.__new__(LLMService)
     service.configured = configured
     service.model = "stub-model"
