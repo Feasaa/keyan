@@ -61,6 +61,13 @@ sr/
 │   ├── test_health.py
 │   ├── test_chat.py
 │   └── test_prompts.py
+├── deploy/                     # 本地依赖编排（Docker，不参与应用打包）
+│   ├── docker-compose.yml      # MySQL 8.4 LTS + Redis 7.4
+│   ├── .env.example            # 复制成 deploy/.env 后填密码
+│   ├── mysql/
+│   │   ├── conf.d/01-server.cnf  # 字符集 / 时区 / 慢查询 / sql_mode
+│   │   └── init/01-schema.sql    # 首次启动自动建表
+│   └── redis/redis.conf        # AOF / volatile-lru / ACL 收权
 ├── environment.yml             # conda 环境定义
 ├── requirements.txt            # pip 依赖
 ├── pyproject.toml              # 项目元信息 + pytest / ruff 配置
@@ -176,7 +183,35 @@ pip install -r requirements.txt
 > 若 pip 报 SSL 错误，换镜像：
 > `pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com`
 
-## 六、运行
+## 六、本地依赖（MySQL + Redis）
+
+数据库与缓存用 Docker 起，配置在 `deploy/`：
+
+```
+deploy/
+├── docker-compose.yml        # MySQL 8.4 LTS + Redis 7.4
+├── .env.example              # 复制成 .env，改密码
+├── mysql/
+│   ├── conf.d/01-server.cnf  # 字符集 / 时区 / 慢查询 / sql_mode
+│   └── init/01-schema.sql    # 首次启动自动建表
+└── redis/
+    └── redis.conf            # AOF + volatile-lru + ACL 收权
+```
+
+```powershell
+cd D:\workspace\python\sr\deploy
+cp .env.example .env           # 改掉里面的三个密码
+docker compose up -d           # 首次启动会自动执行 init/01-schema.sql
+docker compose ps              # 等到两个服务都 healthy
+```
+
+三个容易踩的点：
+
+- **init 脚本只在数据卷为空时执行一次**。改了 `01-schema.sql` 想重来，必须 `docker compose down -v` 把卷删掉——`-v` 会连数据一起删，生产别这么干，改结构走迁移。
+- **MySQL 8.4 默认认证插件是 `caching_sha2_password`**，PyMySQL / aiomysql 需要装 `cryptography` 才能握手，否则报 `RuntimeError: 'cryptography' package is required`。8.4 已经移除了 `--default-authentication-plugin`，不要指望退回 `mysql_native_password`。
+- **雪花 ID 出接口必须转字符串**。`BIGINT` 超过 2^53，前端 `JSON.parse` 会把末几位变成 0，拿到的 ID 直接查不到记录。Pydantic 里用 `field_serializer` 或直接声明 `str`。
+
+## 七、运行
 
 ```powershell
 conda activate fastapi-learn
@@ -203,7 +238,7 @@ uvicorn app.main:app --reload --port 8000
 > 若 8000 被旧进程占用（报 `[Errno 10048]`），先找到并停掉：
 > `Get-NetTCPConnection -LocalPort 8000 -State Listen` → `Stop-Process -Id <PID>`。
 
-## 七、测试
+## 八、测试
 
 ```powershell
 conda activate fastapi-learn
@@ -213,7 +248,7 @@ pytest
 
 测试用桩链替换 LLM 服务（`dependency_overrides[get_llm_service]`，对应 Spring 的 `@MockBean`），不依赖外部网络，随时可跑。
 
-## 八、接口契约
+## 九、接口契约
 
 ### 对话（/api/v1/chat，LangChain LCEL 链）
 
@@ -368,7 +403,7 @@ curl.exe http://127.0.0.1:8000/api/v1/chat/status
 
 ---
 
-## 九、下一步可以练什么
+## 十、下一步可以练什么
 
 按由易到难：
 

@@ -1,0 +1,98 @@
+# 本地依赖编排：MySQL 8.4 LTS + Redis 7
+#
+# 用法（在 deploy/ 目录下）：
+#   cp .env.example .env      # 改掉里面的密码
+#   docker compose up -d      # 首次启动会自动执行 mysql/init/*.sql
+#   docker compose ps         # 等两个服务都变成 healthy
+#
+# 只绑定 127.0.0.1：数据库和缓存不应暴露到局域网，容器之间走内网服务名。
+# 端口冲突时改 .env 里的 MYSQL_PORT / REDIS_PORT，不要改容器内端口。
+
+name: agent-chat
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: agent-chat-mysql
+    restart: unless-stopped
+    environment:
+      # 库名固定，不开放配置：init 脚本里写死了 USE agent_chat，
+      # 允许改名会立刻造成两边不一致。
+      MYSQL_DATABASE: agent_chat
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD 未设置，请先复制 .env.example 为 .env}
+      MYSQL_USER: ${MYSQL_USER:-app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD 未设置}
+      TZ: UTC
+    ports:
+      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
+    volumes:
+      # 命名卷：数据在卷里，容器可随时重建。删数据请显式 docker compose down -v
+      - mysql-data:/var/lib/mysql
+      # 只在数据目录为空时执行，且按文件名顺序：01-schema.sql
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+      - ./mysql/conf.d:/etc/mysql/conf.d:ro
+    healthcheck:
+      # 不用 mysqladmin ping：它连密码错都返回 alive，等于没校验。
+      # 这里跑一条真查询，把"进程活着"升级成"能认证、能查库"。
+      test:
+        - CMD-SHELL
+        - mysql -h 127.0.0.1 -u"$$MYSQL_USER" -p"$$MYSQL_PASSWORD" -e "SELECT 1" >/dev/null 2>&1
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      # 首次启动要初始化数据目录 + 跑 init 脚本，给足时间
+      start_period: 40s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: agent-chat-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD 未设置}
+    # 密码走命令行参数而不是写进 redis.conf：
+    # 配置文件是进版本库的，密码必须留在 .env 里。
+    # 命令行参数会覆盖 conf 中的同名配置。
+    #
+    # 用 ACL 而不是 --requirepass：这样能在设密码的同时摘掉危险命令
+    # （-@dangerous 覆盖 FLUSHALL / FLUSHDB / KEYS / CONFIG / DEBUG 等），
+    # 而 rename-command 在 Redis 7 已废弃，且会影响 AOF 命令回放。
+    command:
+      - redis-server
+      - /usr/local/etc/redis/redis.conf
+      - --user
+      - default on >${REDIS_PASSWORD:?REDIS_PASSWORD 未设置} ~* &* +@all -@dangerous
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - redis-cli -a "$$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+volumes:
+  mysql-data:
+    name: agent-chat-mysql-data
+  redis-data:
+    name: agent-chat-redis-data
+
+networks:
+  default:
+    name: agent-chat-net

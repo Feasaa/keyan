@@ -1,0 +1,42 @@
+[mysqld]
+# ---- 字符集 ----
+# utf8mb4 是唯一能存 emoji / 生僻字的字符集；utf8mb3 存四字节字符会直接报错。
+character-set-server = utf8mb4
+collation-server = utf8mb4_0900_ai_ci
+
+# ---- 时区 ----
+# 容器内统一 UTC，应用侧也按 UTC 写入，展示层再转本地时区。
+# 依赖宿主机时区会让同一份数据在不同机器上含义不同。
+default-time-zone = '+00:00'
+
+# ---- 连接 ----
+# 跳过反向 DNS 解析：每条新连接省一次解析，容器网络里 DNS 解析还可能超时。
+skip-name-resolve = 1
+max_connections = 500
+
+# ---- InnoDB ----
+# 缓冲池是 MySQL 最重要的参数，本地开发给 512M；
+# 生产一般按物理内存的 50%~70% 设置。
+innodb_buffer_pool_size = 512M
+# 8.0.30 起 innodb_log_file_size 被 innodb_redo_log_capacity 取代，8.4 已移除前者
+innodb_redo_log_capacity = 512M
+# 1 = 每次事务提交都刷盘（最安全）；0 性能最好但崩溃可能丢 1 秒事务。
+# 会话消息不能丢，保持 1。
+innodb_flush_log_at_trx_commit = 1
+
+# ---- 慢查询 ----
+# 超过 0.5 秒记入慢日志：会话列表、上下文分页这类查询应该远低于这个值。
+slow_query_log = 1
+long_query_time = 0.5
+log_queries_not_using_indexes = 0
+
+# ---- SQL 模式 ----
+# STRICT_TRANS_TABLES：超长/类型不符直接报错，而不是静默截断。
+# 静默截断会让"内容莫名其妙少一截"这种 bug 极难排查。
+sql_mode = ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+
+[client]
+default-character-set = utf8mb4
+
+[mysql]
+default-character-set = utf8mb4
