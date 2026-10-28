@@ -146,10 +146,15 @@ FastAPI / Starlette 内置只有通用的 `StreamingResponse`，**没有 SSE 语
 
 | 路径 | 语义 | 失败后果 |
 | --- | --- | --- |
-| `/health` | liveness：进程活着、装配正常，不查外部依赖 | 编排系统重启容器 |
-| `/health/ready` | readiness：`ready` / `degraded`，检查 LLM 是否配置 | 只摘流量，不重启 |
+| `/health` | liveness：进程活着、装配正常，不查任何外部依赖 | 编排系统重启容器 |
+| `/health/ready` | readiness：检查 DB、Redis、LLM 三个依赖 | 只摘流量，不重启 |
 
-两者不能合并成一个：合并会让"依赖抖动"触发实例重启，把小故障放大成雪崩。LLM 未配置时 readiness 返回 `degraded` 而非失败 —— 服务仍能提供健康检查等能力，对话接口明确返回 503。
+`readiness` 三档结论：
+- `ready`（HTTP 200）：全部正常
+- `degraded`（HTTP 200）：有依赖未配置（如本地开发没起 Redis），服务仍可用
+- `not_ready`（HTTP 503）：有依赖配了但连不上（如 MySQL 挂了），负载均衡应摘掉本实例
+
+两者不能合并成一个：合并会让"依赖抖动"触发实例重启，把小故障放大成雪崩。DB/Redis 挂了必须返回 503，让流量转给健康实例；只返回 `degraded` 200 的话用户只会看到一堆 500。
 
 ## 链的结构
 

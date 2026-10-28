@@ -17,11 +17,14 @@ class HealthResponse(BaseModel):
 class ReadinessResponse(BaseModel):
     status: str = Field(
         ...,
-        description="ready 可全量服务；degraded 可服务但核心能力降级",
+        description=(
+            "ready 全部依赖正常；degraded 有依赖未配置（功能关闭）但仍返回 200；"
+            "not_ready 有依赖配了却连不上，同时返回 HTTP 503"
+        ),
         examples=["ready"],
     )
     checks: dict[str, str] = Field(
         ...,
-        description="各依赖的检查结果",
-        examples=[{"llm": "configured"}],
+        description="各依赖的检查结果：ok / not_configured / error",
+        examples=[{"db": "ok", "redis": "ok", "llm": "ok"}],
     )

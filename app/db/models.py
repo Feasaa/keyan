@@ -236,6 +236,8 @@ class AuthSession(Base):
     __table_args__ = (
         UniqueConstraint("refresh_token_hash", name="uk_sess_token"),
         Index("idx_sess_user", "user_id", "expires_at"),
+        # 复用检测要按 family 批量撤销，没有索引就是全表扫
+        Index("idx_sess_family", "family_id"),
         {"comment": "登录态"},
     )
 
@@ -244,6 +246,13 @@ class AuthSession(Base):
         SnowflakeID,
         ForeignKey("users.id", name="fk_sess_user", ondelete="CASCADE", onupdate="RESTRICT"),
     )
+    # 同一条登录链路（登录 → 第一次轮换 → 第二次轮换 …）共用一个 family。
+    # 首次签发时 family = 自己的 id；之后每代继承上一代的值。
+    # 为什么要它：refresh token 是轮换的，一个**已撤销**的 token 再次出现，
+    # 要么是并发重试，要么是被人复制走了。后者意味着整条链路都已泄露，
+    # 必须一次性全撤 —— 没有 family 就只能"撤销该用户全部会话"，
+    # 把用户其他设备也一起踢掉。
+    family_id: Mapped[int] = mapped_column(SnowflakeID, comment="登录链路 ID")
     # 只存 sha256，绝不存原文：数据库被读走也无法直接冒用。
     # CHAR 而不是 VARCHAR：sha256 十六进制恒为 64 字符，定长类型不存长度前缀。
     refresh_token_hash: Mapped[str] = mapped_column(CHAR(64))

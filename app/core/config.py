@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     # SSE：ping 注释的间隔（秒）。要小于网关/负载均衡的空闲超时（常见 60s）
     SSE_PING_SECONDS: float = 15.0
 
+    # 就绪探针里单个依赖检查的超时（秒）。
+    # 必须远小于编排系统的探针超时（k8s 默认 1s/次、失败 3 次摘流量），
+    # 否则"探针在等 MySQL"会被当成"探针挂了"，把所有实例一起摘掉。
+    HEALTH_CHECK_TIMEOUT_SECONDS: float = 2.0
+
     # LLM（LangChain，OpenAI 兼容网关）
     # 密钥为空 = 功能关闭，服务照常启动，/api/v1/chat/* 返回 503
     LLM_API_KEY: str = ""
@@ -103,6 +108,19 @@ class Settings(BaseSettings):
     # 想立刻踢人只能靠 refresh 撤销，所以 access 不能设成几天。
     ACCESS_TOKEN_TTL_SECONDS: int = 15 * 60
     REFRESH_TOKEN_TTL_SECONDS: int = 30 * 24 * 3600
+
+    # refresh token 复用检测的宽限期（秒）。
+    # 轮换后旧 token 再次出现，只有两种可能：并发/重试，或者 token 被盗用。
+    # 宽限期内视为前者（不撤销、不告警），超过则按盗用处理：
+    # 撤销整条链路并告警。窗口越短越安全，但也越容易误伤网络重试。
+    REFRESH_REUSE_GRACE_SECONDS: int = 30
+
+    # 登录失败限流。必须在验密之前拦：argon2id 单次约 50ms CPU，
+    # 没有计数时登录接口就是个免认证的 CPU 放大器。
+    # 按账号防定点爆破，按 IP 防一台机器换账号刷。
+    LOGIN_MAX_ATTEMPTS_PER_EMAIL: int = 5
+    LOGIN_MAX_ATTEMPTS_PER_IP: int = 20
+    LOGIN_FAILURE_WINDOW_SECONDS: int = 15 * 60
 
     # ---- 邮件（QQ SMTP）----
     # 465 走隐式 SSL，587 走 STARTTLS，由端口自动判定，不再单独开关。

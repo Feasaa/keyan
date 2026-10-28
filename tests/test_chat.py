@@ -1,9 +1,12 @@
 """对话接口测试：一次性响应、SSE 流式、错误映射、role 白名单。"""
 
+import inspect
 import json
+import logging
 from collections.abc import Callable
 from typing import Any
 
+from app.services.llm_service import LLMService
 from fastapi.testclient import TestClient
 
 CHAT = "/api/v1/chat"
@@ -39,8 +42,22 @@ def test_chat_success(client: TestClient, stub_llm: Callable[..., Any]) -> None:
     assert body["code"] == 0
     assert body["data"]["answer"] == "LangChain 是一个 LLM 应用开发框架。"
     assert body["data"]["model"] == "stub-model"
+    # usage 不再是永远为 null 的死字段
+    assert body["data"]["usage"] == {"prompt_tokens": 11, "completion_tokens": 22}
     assert stub.calls[0]["message"] == "用一句话介绍 LangChain"
     assert stub.calls[0]["history"] == []
+
+
+def test_chat_is_async_only() -> None:
+    """一次性对话必须是协程，且**不存在**同步版本。
+
+    这是一个曾经的真实 bug：async 端点里调同步 chain.invoke，
+    事件循环被堵住最长 60s × 重试次数，期间数据库、Redis、在途 SSE
+    全部停摆（别人的流连心跳都发不出去，被网关判超时掐断）。
+    保留同步方法就等于给这个 bug 留了条回头路，所以直接不给。
+    """
+    assert inspect.iscoroutinefunction(LLMService.achat)
+    assert not hasattr(LLMService, "chat")
 
 
 def test_chat_with_history(client: TestClient, stub_llm: Callable[..., Any]) -> None:
@@ -212,6 +229,27 @@ def test_stream_upstream_error_emits_error_event(
     assert '"code":22502' in errors[0]
     assert "sk-secret-leak" not in errors[0]
     assert ("done", "[DONE]") not in frames
+
+
+def test_stream_upstream_error_is_logged_server_side(
+    client: TestClient, failing_llm: Callable[..., None], caplog: Any
+) -> None:
+    """流内错误必须落服务端日志。
+
+    响应是 200 的流，状态码上看不出任何异常 —— 如果只发 event=error 不记日志，
+    这次故障在服务端就是"查无此事"，5xx 级的上游问题也不会触发告警。
+    """
+    failing_llm(RuntimeError("upstream boom"))
+
+    with caplog.at_level(logging.ERROR, logger="app.api.routes.chat"):
+        with client.stream("POST", STREAM, json={"message": "你好"}) as response:
+            "".join(response.iter_text())
+
+    records = [r for r in caplog.records if "对话流中断" in r.getMessage()]
+    assert records, f"未记录流内错误，实际日志：{[r.getMessage() for r in caplog.records]}"
+    message = records[0].getMessage()
+    assert "22502" in message  # 业务错误码
+    assert records[0].exc_info is not None  # 带堆栈，能溯源到原始异常
 
 
 def test_health_unaffected_by_llm(client: TestClient, stub_llm: Callable[..., Any]) -> None:

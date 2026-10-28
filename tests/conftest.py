@@ -1,7 +1,11 @@
 """pytest 公共夹具：客户端 + LLM 桩（成功/失败两种）+ 鉴权测试环境。
 
-桩只实现被调用到的方法（invoke / astream_events），与 LCEL 链同构，
+桩只实现被调用到的方法（ainvoke / astream_events），与 LCEL 链同构，
 通过 dependency_overrides 注入，生产代码零改动。
+
+**故意不提供同步 invoke**：一次性对话走的是 `await chain.ainvoke`，
+桩若同时提供 invoke，某个调用点退回同步实现时测试照样能过，
+等于把"阻塞事件循环"这个 bug 放过去了。
 """
 
 import asyncio
@@ -23,6 +27,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import create_async_engine
 
+USAGE = {"input_tokens": 11, "output_tokens": 22, "total_tokens": 33}
+
 
 class StubChain:
     """逐字产出的桩链，事件结构与 LangChain 的 astream_events 一致。"""
@@ -31,9 +37,9 @@ class StubChain:
         self.answer = answer
         self.calls: list[dict[str, Any]] = []
 
-    def invoke(self, inputs: dict[str, Any]) -> str:
+    async def ainvoke(self, inputs: dict[str, Any]) -> AIMessage:
         self.calls.append(inputs)
-        return self.answer
+        return AIMessage(content=self.answer, usage_metadata=USAGE)
 
     async def astream_events(
         self, inputs: dict[str, Any], version: str = "v2"
@@ -48,16 +54,7 @@ class StubChain:
         yield {
             "event": "on_chat_model_end",
             "name": "ChatOpenAI",
-            "data": {
-                "output": AIMessage(
-                    content=self.answer,
-                    usage_metadata={
-                        "input_tokens": 11,
-                        "output_tokens": 22,
-                        "total_tokens": 33,
-                    },
-                )
-            },
+            "data": {"output": AIMessage(content=self.answer, usage_metadata=USAGE)},
         }
 
 
@@ -67,7 +64,7 @@ class ExplodingChain:
     def __init__(self, exc: Exception) -> None:
         self.exc = exc
 
-    def invoke(self, inputs: dict[str, Any]) -> str:
+    async def ainvoke(self, inputs: dict[str, Any]) -> AIMessage:
         raise self.exc
 
     async def astream_events(
@@ -180,6 +177,10 @@ def _test_settings() -> Settings:
             # 冷却缩到 1 秒：有些用例（比如"重复注册"）必须给同一个邮箱发两次码，
             # 保持 60 秒会让每个这类用例都卡一分钟。
             "VERIFICATION_CODE_RESEND_SECONDS": 1,
+            # 登录失败也按 IP 计数，而所有用例都来自同一个测试客户端 IP。
+            # 不放大就会"单跑能过、整套跑 429"。按账号的阈值保持 5，
+            # 那才是 test_auth.py 里要断言的东西。
+            "LOGIN_MAX_ATTEMPTS_PER_IP": 1000,
         }
     )
 

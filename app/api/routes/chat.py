@@ -12,12 +12,14 @@ SSE 仍有两种错误通道，这一点没变：
 """
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, Request
 from sse_starlette import EventSourceResponse, JSONServerSentEvent, ServerSentEvent
 
 from app.core.config import Settings, get_settings
+from app.core.context import current_trace_id
 from app.core.response import ApiResponse, ok
 from app.core.sse import EVENT_DELTA, EVENT_DONE, EVENT_ERROR, EVENT_META, SSE_DONE
 from app.schemas.chat import (
@@ -36,6 +38,8 @@ from app.services.llm_service import (
     get_llm_service,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 
@@ -49,8 +53,8 @@ async def chat(
     payload: ChatRequest,
     service: LLMService = Depends(get_llm_service),
 ) -> ApiResponse[ChatResponse]:
-    answer, model_name = service.chat(payload)
-    return ok(ChatResponse(answer=answer, model=model_name))
+    result = await service.achat(payload)
+    return ok(ChatResponse(answer=result.answer, model=result.model, usage=result.usage))
 
 
 @router.post(
@@ -103,11 +107,25 @@ async def _event_source(
                 yield JSONServerSentEvent(data=_meta(item).model_dump(), event=EVENT_META)
         yield ServerSentEvent(data=SSE_DONE, event=EVENT_DONE)
     except asyncio.CancelledError:
-        # 客户端断开：静默结束，不再写任何帧
+        # 客户端断开：静默结束，不再写任何帧。
+        # 但要留一条日志 —— 用户报"回答到一半没了"时，这是唯一能区分
+        # "他自己关的页面"和"服务端崩了"的证据。
+        logger.info("对话流被客户端中断 trace_id=%s", current_trace_id())
         raise
     except (LLMUpstreamError, ServiceError) as exc:
         # 流已开始，状态码改不了了，只能用事件传递。
         # code 用业务错误码而不是裸 HTTP 状态码，和 JSON 接口保持一致。
+        #
+        # 必须同时落服务端日志：前置错误有全局处理器记，流内错误如果只发帧，
+        # 就变成"客户端知道、服务端查无此事"—— 5xx 级的上游故障本该触发告警，
+        # 却因为走的是 200 的流而完全不可观测。
+        logger.error(
+            "对话流中断 code=%s trace_id=%s message=%s",
+            exc.error_code.code,
+            current_trace_id(),
+            exc.message,
+            exc_info=exc,
+        )
         yield JSONServerSentEvent(
             data=StreamError(code=exc.error_code.code, message=exc.message).model_dump(),
             event=EVENT_ERROR,

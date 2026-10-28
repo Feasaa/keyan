@@ -143,14 +143,17 @@ def test_login_payload_cannot_bypass(auth_client, payload: str) -> None:
 
 
 @pytest.mark.parametrize("payload", PAYLOADS)
-def test_password_payload_is_just_a_string(auth_client, payload: str) -> None:
+def test_password_payload_is_just_a_string(auth_client, make_email, payload: str) -> None:
     """密码字段没有格式限制，载荷会一路走到哈希比对 —— 那里必须安全。
 
     密码只参与哈希计算，永远不进 SQL，所以无论多奇怪的字符串，
     结果都只能是"密码不正确"。
+
+    每个载荷用一个独立邮箱：登录失败是按账号计数的，共用一个邮箱会在
+    第 6 个载荷时被限流成 429，掩盖掉真正要断言的 401。
     """
     response = auth_client.post(
-        "/api/v1/auth/login", json={"email": "victim@example.com", "password": payload}
+        "/api/v1/auth/login", json={"email": make_email(), "password": payload}
     )
     assert response.status_code == 401, response.text
     assert response.json()["code"] == 11401

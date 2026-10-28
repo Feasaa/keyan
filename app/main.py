@@ -3,6 +3,7 @@
 启动：uvicorn app.main:app --reload --port 8000
 """
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -11,11 +12,43 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import api_router
-from app.core.config import settings
+from app.core.config import Settings, settings
 from app.core.exception_handlers import register_exception_handlers
-from app.core.middleware import RequestContextMiddleware
+from app.core.middleware import TRACE_ID_HEADER, RequestContextMiddleware
 from app.db import close_redis, dispose_engine
 from app.prompts import get_prompt_registry
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_cors(config: Settings) -> tuple[list[str], bool]:
+    """把 CORS 配置解析成 (origins, allow_credentials)。
+
+    为什么有通配符时必须关掉凭证：
+        CORS 规范禁止 `Access-Control-Allow-Origin: *` 与
+        `Access-Control-Allow-Credentials: true` 并存。Starlette 的处理是
+        **把请求的 Origin 原样回显**（见 cors.py 的 `allow_explicit_origin`），
+        于是响应头在语法上是合法的、浏览器也照收 —— 问题不在"被拒绝"，
+        而在"被放行"：既然所有 Origin 都允许，回显就等于任何站点都能发起
+        带凭证的跨域请求并读到响应内容。
+
+        本项目目前用 `Authorization: Bearer`，凭证不在浏览器里自动携带，
+        危害有限；但只要哪天有人改成 Cookie 会话，这一条立刻变成
+        "任意网站可读取登录用户的全部接口"。所以要在它还是隐患时就堵掉。
+
+    结论：`*` 与 credentials 二选一，有 `*` 就关 credentials。
+    真要带凭证，就把具体域名写进 CORS_ORIGINS。
+    """
+    origins = list(config.CORS_ORIGINS)
+    if "*" not in origins:
+        return origins, True
+
+    logger.warning(
+        "CORS_ORIGINS 含通配符 '*'，已自动关闭 allow_credentials："
+        "否则中间件会回显任意 Origin，等于允许所有站点发起带凭证的跨域请求。"
+        "需要凭证请把具体域名写进 CORS_ORIGINS。"
+    )
+    return origins, False
 
 
 @asynccontextmanager
@@ -48,13 +81,15 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # 生产环境请把 allow_origins 收敛为具体域名
+    origins, allow_credentials = _resolve_cors(settings)
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.CORS_ORIGINS,
-        allow_credentials=True,
+        allow_origins=origins,
+        allow_credentials=allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
+        # 前端要读 trace_id 去对服务端日志，默认不暴露的话 JS 拿不到
+        expose_headers=[TRACE_ID_HEADER],
     )
 
     # 后加的在外层：trace_id 要在 CORS 之前拿到，

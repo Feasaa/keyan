@@ -4,9 +4,18 @@
 事务边界、级联删除这些真正会出事的地方。
 """
 
+import asyncio
+import logging
+import threading
 import time
+from datetime import timedelta
 
+from app.core.config import get_settings
+from app.core.security import hash_refresh_token
+from app.db.base import utcnow
 from fastapi.testclient import TestClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 CODE_PATH = "/api/v1/auth/verification-code"
 REGISTER_PATH = "/api/v1/auth/register"
@@ -43,6 +52,37 @@ def _login(client: TestClient, email: str, password: str = PASSWORD):
 
 def _bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _age_revoked_at(refresh_token: str, seconds: int) -> None:
+    """把某条会话的撤销时间往前拨，用来跨越 refresh 复用宽限期。
+
+    为什么改数据而不是 `time.sleep(31)`：
+        "宽限期"只是 `_report_reuse` 里的一次时间减法，等真实时间既让用例
+        慢 30 秒，又把结果绑在机器负载上（调度延迟会让边界变得不确定）。
+        改 `revoked_at` 是把"30 秒过去了"这个前提直接摆好。
+
+    注意这里复用应用自己的 `utcnow()`：全链路约定 naive UTC，
+    用 `NOW()` 之类的库端时间函数会引入时区假设，一旦库的 time_zone
+    不是 UTC，`_report_reuse` 算出来的 age 就是负的，用例会以
+    "宽限期意外生效"的形式失败，且极难定位。
+    """
+    settings = get_settings()
+    token_hash = hash_refresh_token(refresh_token)
+
+    async def run() -> None:
+        engine = create_async_engine(settings.database_url)
+        try:
+            async with engine.begin() as conn:
+                result = await conn.execute(
+                    text("UPDATE auth_sessions SET revoked_at = :ts WHERE refresh_token_hash = :h"),
+                    {"ts": utcnow() - timedelta(seconds=seconds), "h": token_hash},
+                )
+                assert result.rowcount == 1, "没有匹配到会话，用例前提不成立"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
 
 
 # ------------------------------------------------------------------ 注册
@@ -191,6 +231,67 @@ def test_login_email_is_case_insensitive(auth_client: TestClient, stub_mail, mak
     assert response.status_code == 200, response.text
 
 
+# ------------------------------------------------------------------ 登录失败限流
+
+MAX_ATTEMPTS = 5
+
+
+def test_login_locks_account_after_repeated_failures(
+    auth_client: TestClient, stub_mail, make_email
+) -> None:
+    """连错 5 次后锁定，且**密码正确也进不去**。
+
+    没有这道闸时，登录接口就是个免认证的 CPU 放大器：
+    argon2 每次约 50ms，脚本狂刷就能把工作进程占满。
+    """
+    email = make_email()
+    _register_ok(auth_client, stub_mail, email)
+
+    for _ in range(MAX_ATTEMPTS):
+        assert _login(auth_client, email, "wrong password").status_code == 401
+
+    blocked = _login(auth_client, email, "wrong password")
+    assert blocked.status_code == 429
+    body = blocked.json()
+    assert body["code"] == 11429
+    assert "分钟" in body["message"]
+
+    # 关键：锁定期间连正确密码也拒绝，否则限流等于没有
+    assert _login(auth_client, email, PASSWORD).status_code == 429
+
+
+def test_login_lockout_does_not_reveal_account_existence(
+    auth_client: TestClient, make_email
+) -> None:
+    """不存在的邮箱同样会被锁成 429。
+
+    只锁"存在的账号"的话，第 6 次请求返回 401 还是 429
+    就成了账号存在性预言机 —— 而账号枚举正是登录接口最该防的事。
+    """
+    ghost = make_email()
+
+    for _ in range(MAX_ATTEMPTS):
+        assert _login(auth_client, ghost, "whatever").status_code == 401
+
+    assert _login(auth_client, ghost, "whatever").status_code == 429
+
+
+def test_login_success_resets_failure_counter(
+    auth_client: TestClient, stub_mail, make_email
+) -> None:
+    """成功登录清掉本账号计数，别让用户"错几次之后一直正常"也被锁。"""
+    email = make_email()
+    _register_ok(auth_client, stub_mail, email)
+
+    for _ in range(MAX_ATTEMPTS - 1):
+        assert _login(auth_client, email, "wrong password").status_code == 401
+
+    assert _login(auth_client, email, PASSWORD).status_code == 200
+
+    # 计数已清零：再错一次应该是 401，而不是撞到第 6 次被锁
+    assert _login(auth_client, email, "wrong password").status_code == 401
+
+
 # ------------------------------------------------------------------ 令牌
 
 
@@ -264,3 +365,86 @@ def test_logout_is_idempotent(auth_client: TestClient) -> None:
 def test_refresh_with_garbage_token(auth_client: TestClient) -> None:
     response = auth_client.post(REFRESH_PATH, json={"refresh_token": "nope"})
     assert response.status_code == 401
+
+
+def _refresh(client: TestClient, token: str):
+    return client.post(REFRESH_PATH, json={"refresh_token": token})
+
+
+def test_concurrent_refresh_issues_only_one_token(
+    auth_client: TestClient, stub_mail, make_email
+) -> None:
+    """同一个 token 并发刷新，只能有一个成功。
+
+    没有 `SELECT ... FOR UPDATE` 时，两个请求各自在自己的快照里看到
+    `revoked_at IS NULL`，于是各轮换出一对令牌 —— 一次刷新变出两条有效链路，
+    客户端只拿到其中一条，另一条成了没人使用却依然有效的"幽灵登录态"。
+
+    说明：真正重叠时才可能双发，而线程调度不保证重叠；
+    因此这个用例的作用是"有重叠就一定抓到"，不是"没重叠也能抓到"。
+    屏障让两个线程尽量同时进入请求，提高撞上窗口的概率。
+    """
+    token = _register_ok(auth_client, stub_mail, make_email())["data"]["token"]["refresh_token"]
+
+    barrier = threading.Barrier(2, timeout=5)
+    codes: list[int] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        barrier.wait()
+        code = _refresh(auth_client, token).status_code
+        with lock:
+            codes.append(code)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert sorted(codes) == [200, 401], f"期望恰好一次成功，实际 {sorted(codes)}"
+
+
+def test_replay_beyond_grace_revokes_whole_family(
+    auth_client: TestClient, stub_mail, make_email, caplog
+) -> None:
+    """超过宽限期重放旧 token：整条登录链路作废。
+
+    只撤被重放的那一个没用 —— 攻击者手上可能是链路中**任意一代**的 token。
+    既然已经能确认"有人拿着早就轮换掉的凭证在用"，唯一安全的假设是
+    这条链路全线泄露，必须连新签发的一起撤掉。
+    """
+    body = _register_ok(auth_client, stub_mail, make_email())
+    old_refresh = body["data"]["token"]["refresh_token"]
+    new_refresh = _refresh(auth_client, old_refresh).json()["data"]["token"]["refresh_token"]
+
+    grace = get_settings().REFRESH_REUSE_GRACE_SECONDS
+    _age_revoked_at(old_refresh, grace + 60)
+
+    with caplog.at_level(logging.WARNING, logger="app.services.auth_service"):
+        replay = _refresh(auth_client, old_refresh)
+    assert replay.status_code == 401
+
+    # 关键断言：不是"这个 token 失效"，而是链路作废 —— 刚签发的那份也一起废了
+    assert _refresh(auth_client, new_refresh).status_code == 401
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("refresh token 复用" in message for message in warnings), warnings
+
+
+def test_replay_within_grace_keeps_family(auth_client: TestClient, stub_mail, make_email) -> None:
+    """宽限期内重放按"客户端重试"处理，不能一刀切撤销。
+
+    并发刷新、网络超时重试都会在轮换后几秒内再发一次旧 token。
+    这里若也撤整条链路，正常用户会被自己的重试踢下线 ——
+    安全策略的误伤成本和漏报成本要一起算，30 秒的窗口就是在买这个平衡。
+    """
+    body = _register_ok(auth_client, stub_mail, make_email())
+    old_refresh = body["data"]["token"]["refresh_token"]
+    new_refresh = _refresh(auth_client, old_refresh).json()["data"]["token"]["refresh_token"]
+
+    assert _refresh(auth_client, old_refresh).status_code == 401
+
+    # 链路没被撤：新 token 照常可用，而且能继续轮换下去
+    again = _refresh(auth_client, new_refresh)
+    assert again.status_code == 200, again.text

@@ -1,10 +1,14 @@
-"""LLM 服务：LangChain LCEL 链（prompt | model | parser）的封装。
+"""LLM 服务：LangChain LCEL 链（prompt | model）的封装。
 
 客户端是进程级单例：内部持有 httpx 连接池，每请求新建会导致连接风暴。
 未配置密钥时不构建链，调用方拿到 LLMNotConfiguredError，由路由层映射 503。
 
 提示词以运行时变量传入链（`{system_prompt}`），不在建链时固化 ——
 这样改提示词文件只影响后续请求，不必重建客户端、也不会丢连接池。
+
+链尾**不挂 StrOutputParser**：解析器会把 AIMessage 压成 str，
+usage_metadata / response_metadata 一起丢掉，`ChatResponse.usage`
+就只能永远为 null。文本自己取（`_chunk_text`），元信息也拿得到。
 """
 
 import logging
@@ -13,7 +17,6 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
-from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableSerializable
 from langchain_openai import ChatOpenAI
@@ -31,6 +34,15 @@ class TokenDelta:
     """一段增量文本。"""
 
     text: str
+
+
+@dataclass(frozen=True)
+class ChatResult:
+    """一次性对话的结果：回答 + 实际模型 + 令牌用量。"""
+
+    answer: str
+    model: str
+    usage: dict[str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -81,8 +93,8 @@ class LLMService:
             max_retries=settings.LLM_MAX_RETRIES,
             base_url=settings.LLM_BASE_URL or None,
         )
-        parser = StrOutputParser()
-        return prompt | model | parser
+        # 不拼 StrOutputParser：见模块 docstring，解析器会丢掉用量元信息
+        return prompt | model
 
     # ------------------------------------------------------------------ 校验
 
@@ -100,8 +112,15 @@ class LLMService:
 
     # ------------------------------------------------------------------ 调用
 
-    def chat(self, payload: ChatRequest) -> tuple[str, str]:
-        """一次性返回 (answer, model_name)。"""
+    async def achat(self, payload: ChatRequest) -> ChatResult:
+        """一次性返回完整回答。
+
+        必须是 async + `ainvoke`：这是一个 async 端点，事件循环上同时挂着
+        数据库连接、Redis 和在途 SSE 流。同步 `invoke` 会把整个循环堵死
+        （最长 60s × 重试次数），期间**全站**请求都停摆 ——
+        包括别人的 SSE 心跳，被网关判超时后连接直接被掐。
+        同步调用只在纯同步上下文（脚本、线程池）里才允许。
+        """
         self.ensure_configured()
         chain = self._chain
         if chain is None:  # 仅为类型收窄，逻辑上不会走到
@@ -117,10 +136,16 @@ class LLMService:
             prompt.checksum,
         )
         try:
-            answer: str = chain.invoke(self._chain_inputs(payload, prompt))
+            message: Any = await chain.ainvoke(self._chain_inputs(payload, prompt))
         except Exception as exc:
             raise LLMUpstreamError(type(exc).__name__) from exc
-        return answer, self.model
+
+        finished = _finished(self.model, message)
+        return ChatResult(
+            answer=_chunk_text(message),
+            model=finished.model,
+            usage=_usage_dict(finished),
+        )
 
     async def astream_chat(self, payload: ChatRequest) -> AsyncIterator[StreamEvent]:
         """流式产出结构化事件（基于 astream_events）。
@@ -186,6 +211,17 @@ def _finished(model: str, output: Any) -> StreamFinished:
         prompt_tokens=usage.get("input_tokens"),
         completion_tokens=usage.get("output_tokens"),
     )
+
+
+def _usage_dict(finished: StreamFinished) -> dict[str, int] | None:
+    """转成对外结构。网关不返回用量时给 None，而不是编两个 0 出来 ——
+    "0 token" 和 "不知道多少 token" 是两件事，前者会污染账单统计。"""
+    if finished.prompt_tokens is None and finished.completion_tokens is None:
+        return None
+    return {
+        "prompt_tokens": finished.prompt_tokens or 0,
+        "completion_tokens": finished.completion_tokens or 0,
+    }
 
 
 @lru_cache(maxsize=1)

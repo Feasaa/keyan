@@ -6,8 +6,9 @@
 这不是偷懒，是 NIST SP 800-63B 的明确建议：
     强制复杂度规则会把人逼向 "Passw0rd!" 这类可预测的变形，
     实际熵反而下降；而长度直接决定搜索空间。
-配套要做的是"限制尝试次数"（本项目在验证码和登录两侧都有），
-而不是在字符集上做文章。
+配套要做的是"限制尝试次数"，而不是在字符集上做文章 ——
+本项目两侧都做了：验证码 5 次/码，登录按账号 5 次、按 IP 20 次（15 分钟窗口），
+见 app/services/login_throttle.py。
 
 上限 128 是为了防 DoS：密码长度直接进哈希函数的计算量，
 不设上限时，一个 1MB 的"密码"能让 argon2 占满一个核。
@@ -48,7 +49,7 @@ class RegisterRequest(BaseModel):
     )
     code: str = Field(pattern=r"^\d{6}$", description="6 位邮箱验证码")
     nickname: str = Field(
-        "", max_length=64, description="展示名，可留空（存空串，前端可回退显示邮箱前缀）"
+        "", max_length=64, description="展示名，留空则取邮箱 @ 前缀（见 user_repository.add）"
     )
 
     @field_validator("email")

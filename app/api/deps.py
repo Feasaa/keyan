@@ -21,6 +21,7 @@ from app.db.models import User
 from app.repositories import UserRepository
 from app.services.auth_service import AuthService
 from app.services.exceptions import AuthNotConfiguredError
+from app.services.login_throttle import LoginThrottle
 from app.services.mail_service import MailService, get_mail_service
 from app.services.verification_service import VerificationService
 
@@ -62,12 +63,21 @@ def get_verification_service(
     return VerificationService(get_redis(), mail, settings)
 
 
+def get_login_throttle(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> LoginThrottle:
+    if not settings.redis_configured:
+        raise AuthNotConfiguredError("REDIS_PASSWORD")
+    return LoginThrottle(get_redis(), settings)
+
+
 def get_auth_service(
     session: Annotated[AsyncSession, Depends(get_session)],
     verification: Annotated[VerificationService, Depends(get_verification_service)],
+    throttle: Annotated[LoginThrottle, Depends(get_login_throttle)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> AuthService:
-    return AuthService(session, verification, settings)
+    return AuthService(session, verification, throttle, settings)
 
 
 async def get_current_user(

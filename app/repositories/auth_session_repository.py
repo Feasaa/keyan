@@ -31,10 +31,14 @@ class AuthSessionRepository:
         expires_at: datetime,
         ip: bytes | None,
         user_agent: str,
+        family_id: int | None = None,
     ) -> AuthSession:
+        session_id = get_snowflake().next_id()
         record = AuthSession(
-            id=get_snowflake().next_id(),
+            id=session_id,
             user_id=user_id,
+            # 首次签发时 family 就是自己；轮换时继承上一代，串成一条链路
+            family_id=family_id or session_id,
             refresh_token_hash=token_hash,
             expires_at=expires_at,
             ip=ip,
@@ -56,6 +60,36 @@ class AuthSessionRepository:
         )
         return await self._session.scalar(stmt)
 
+    async def get_by_token_hash_for_update(self, token_hash: str) -> AuthSession | None:
+        """取有效会话并加行锁。refresh 专用。
+
+        不加锁的话，两个并发请求会各自在自己的快照里看到
+        `revoked_at IS NULL`，各自轮换出一对新令牌 ——
+        一次 refresh 变出两条有效链路，而客户端只拿到其中一条，
+        另一条成了没人使用、却仍然有效的"幽灵登录态"。
+        `FOR UPDATE` 让第二个请求阻塞到第一个提交，再读时已经查不到这行了。
+        """
+        stmt = (
+            select(AuthSession)
+            .where(
+                AuthSession.refresh_token_hash == token_hash,
+                AuthSession.revoked_at.is_(None),
+                AuthSession.expires_at > utcnow(),
+            )
+            .with_for_update()
+        )
+        return await self._session.scalar(stmt)
+
+    async def get_by_token_hash_any(self, token_hash: str) -> AuthSession | None:
+        """不筛状态，**包括已撤销**的会话。
+
+        复用检测要能回答"这个 token 是不是曾经存在、后来被撤销了"，
+        而 get_by_token_hash 会把它过滤掉 —— 那样就分不清
+        "伪造的 token" 和 "真 token 被重复使用"。
+        """
+        stmt = select(AuthSession).where(AuthSession.refresh_token_hash == token_hash)
+        return await self._session.scalar(stmt)
+
     async def get_by_id(self, session_id: int) -> AuthSession | None:
         stmt = select(AuthSession).where(AuthSession.id == session_id)
         return await self._session.scalar(stmt)
@@ -69,6 +103,22 @@ class AuthSessionRepository:
         """
         if record.revoked_at is None:
             record.revoked_at = utcnow()
+
+    async def revoke_family(self, family_id: int) -> int:
+        """撤销一条登录链路上的全部会话。
+
+        refresh token 复用被确认时调用：攻击者手上可能是链路中**任意一代**
+        的 token，只撤被用的那一个挡不住他，必须整条链路一起作废。
+        """
+        now = utcnow()
+        stmt = select(AuthSession).where(
+            AuthSession.family_id == family_id,
+            AuthSession.revoked_at.is_(None),
+        )
+        records = list((await self._session.scalars(stmt)).all())
+        for record in records:
+            record.revoked_at = now
+        return len(records)
 
     async def revoke_all_for_user(self, user_id: int) -> int:
         """踢掉某用户的所有登录态（改密、封号、疑似盗用时调用）。"""

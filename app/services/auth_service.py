@@ -33,6 +33,7 @@ from app.services.exceptions import (
     InvalidCredentialsError,
     SessionInvalidError,
 )
+from app.services.login_throttle import LoginThrottle
 from app.services.verification_service import VerificationService
 from app.utils.masking import mask_email
 from app.utils.net import pack_ip
@@ -51,10 +52,12 @@ class AuthService:
         self,
         session: AsyncSession,
         verification: VerificationService,
+        throttle: LoginThrottle,
         settings: Settings,
     ) -> None:
         self._session = session
         self._verification = verification
+        self._throttle = throttle
         self._settings = settings
         self._users = UserRepository(session)
         self._sessions = AuthSessionRepository(session)
@@ -122,15 +125,22 @@ class AuthService:
     ) -> tuple[User, IssuedTokens]:
         self._ensure_configured()
 
+        # 先看计数，再验密码。顺序不能反 —— argon2 一次约 50ms CPU，
+        # 被刷的时候 CPU 已经花掉了，限流也就没意义了。
+        await self._throttle.ensure_allowed(email=email, client_ip=client_ip)
+
         user = await self._users.get_by_email(email)
         if user is None:
             # 跑一次等量的哈希校验，把响应耗时拉平。
             # 不做这一步，登录接口就是个时序预言机：存在=50ms，不存在=1ms。
             verify_password(password, dummy_hash())
+            # 账号不存在也要计数，否则"第 6 次变 429"会变成账号存在性预言机
+            await self._throttle.record_failure(email=email, client_ip=client_ip)
             raise InvalidCredentialsError()
 
         matched, upgraded = verify_password(password, user.password_hash)
         if not matched:
+            await self._throttle.record_failure(email=email, client_ip=client_ip)
             raise InvalidCredentialsError()
 
         # 密码对了才检查状态：反过来会泄露"这个账号存在但被停用了"
@@ -143,6 +153,8 @@ class AuthService:
             user.password_hash = upgraded
             logger.info("password hash upgraded id=%s", user.id)
 
+        # 登录成功清掉本账号的失败计数；IP 计数留给窗口自然过期
+        await self._throttle.reset(email=email)
         self._users.touch_login(user, ip=pack_ip(client_ip))
         tokens = await self._issue_tokens(user, client_ip=client_ip, user_agent=user_agent)
         await self._session.commit()
@@ -159,9 +171,13 @@ class AuthService:
         user_agent: str,
     ) -> tuple[User, IssuedTokens]:
         self._ensure_configured()
+        token_hash = hash_refresh_token(refresh_token)
 
-        record = await self._sessions.get_by_token_hash(hash_refresh_token(refresh_token))
+        # FOR UPDATE：并发刷新同一 token 时，第二个请求会阻塞到第一个提交，
+        # 再读时这行已经 revoked_at 非空，查不到 —— 不会双发新令牌。
+        record = await self._sessions.get_by_token_hash_for_update(token_hash)
         if record is None:
+            await self._report_reuse(token_hash)
             raise SessionInvalidError()
 
         user = await self._users.get_by_id(record.user_id)
@@ -171,10 +187,45 @@ class AuthService:
         # 轮换：旧 refresh token 立刻作废，换一对新的。
         # 这样即使 refresh token 被复制走，真用户下次刷新时旧的就失效了，
         # 攻击者拿到的那份也用不了 —— 比"一直用同一个"安全得多。
+        # 新令牌继承同一 family，整条链路才能被一起撤销。
         self._sessions.revoke(record)
-        tokens = await self._issue_tokens(user, client_ip=client_ip, user_agent=user_agent)
+        tokens = await self._issue_tokens(
+            user,
+            client_ip=client_ip,
+            user_agent=user_agent,
+            family_id=record.family_id,
+        )
         await self._session.commit()
         return user, tokens
+
+    async def _report_reuse(self, token_hash: str) -> None:
+        """token 没通过有效性检查时，判断是不是"已撤销的 token 被重放"。
+
+        分两种情况：
+            宽限期内  —— 多半是并发刷新或客户端重试，只当普通失效
+            超过宽限期 —— 说明这个 token 早被轮换掉了，还有人拿着用，
+                          基本可以确定是被复制走了，整条链路一起撤销
+        """
+        record = await self._sessions.get_by_token_hash_any(token_hash)
+        if record is None or record.revoked_at is None:
+            # 从没存在过（伪造），或过期但未撤销 —— 都不构成复用证据
+            return
+
+        age = (utcnow() - record.revoked_at).total_seconds()
+        if age <= self._settings.REFRESH_REUSE_GRACE_SECONDS:
+            logger.info("refresh 重放（宽限期内）session=%s age=%.1fs", record.id, age)
+            return
+
+        revoked = await self._sessions.revoke_family(record.family_id)
+        await self._session.commit()
+        # WARNING 级别：这条日志应该被接进告警，它等价于"疑似 token 泄露"
+        logger.warning(
+            "refresh token 复用 session=%s family=%s age=%.0fs 已撤销该链路 %s 个会话",
+            record.id,
+            record.family_id,
+            age,
+            revoked,
+        )
 
     # ------------------------------------------------------------------ 登出
 
@@ -199,7 +250,12 @@ class AuthService:
             raise AuthNotConfiguredError("JWT_SECRET")
 
     async def _issue_tokens(
-        self, user: User, *, client_ip: str | None, user_agent: str
+        self,
+        user: User,
+        *,
+        client_ip: str | None,
+        user_agent: str,
+        family_id: int | None = None,
     ) -> IssuedTokens:
         refresh_token = generate_refresh_token()
         record = self._sessions.add(
@@ -208,6 +264,7 @@ class AuthService:
             expires_at=utcnow() + timedelta(seconds=self._settings.REFRESH_TOKEN_TTL_SECONDS),
             ip=pack_ip(client_ip),
             user_agent=user_agent,
+            family_id=family_id,
         )
         # 必须先 flush 拿到会话主键，access token 里要带 sid
         await self._session.flush()
