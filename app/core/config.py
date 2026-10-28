@@ -4,6 +4,7 @@
 """
 
 from functools import lru_cache
+from urllib.parse import quote_plus
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -58,6 +59,37 @@ class Settings(BaseSettings):
     # 多实例部署时每台必须不同，否则会生成完全相同的 ID。
     # 纪元写死在 app/core/snowflake.py，不开放配置 —— 改纪元会让新旧 ID 撞车。
     SNOWFLAKE_WORKER_ID: int = 0
+
+    # ---- 数据库（MySQL 8.4，见 deploy/）----
+    DB_HOST: str = "127.0.0.1"
+    DB_PORT: int = 3306
+    DB_USER: str = "app"
+    DB_PASSWORD: str = ""
+    DB_NAME: str = "agent_chat"
+    DB_ECHO: bool = False
+
+    # 连接池：单实例并发上限 ≈ POOL_SIZE + MAX_OVERFLOW
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 20
+    # 小于 MySQL 的 wait_timeout（默认 8 小时），主动换掉可能被服务端关闭的连接
+    DB_POOL_RECYCLE_SECONDS: int = 3600
+
+    @property
+    def db_configured(self) -> bool:
+        """没配密码视为"数据库功能关闭"，应用照常启动。"""
+        return bool(self.DB_PASSWORD)
+
+    @property
+    def database_url(self) -> str:
+        """异步 DSN。
+
+        密码必须 quote_plus：密码里出现 @ / : / # 会把 DSN 拆坏，
+        报出来的错还跟密码无关（通常是一句看不懂的 "invalid port"）。
+        """
+        return (
+            f"mysql+aiomysql://{quote_plus(self.DB_USER)}:{quote_plus(self.DB_PASSWORD)}"
+            f"@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}?charset=utf8mb4"
+        )
 
 
 @lru_cache(maxsize=1)

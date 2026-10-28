@@ -44,6 +44,12 @@ sr/
 │   │   ├── files/chat_system.md  # 提示词正文 + 元数据（id / version / description）
 │   │   ├── loader.py           # 加载与校验（不合法启动即失败）
 │   │   └── registry.py         # 按 id 取用 + 按 mtime 热更新
+│   ├── db/                     # 数据访问层（≈ repository + entity）
+│   │   ├── base.py             # ORM 基类 + 约束命名约定 + utcnow
+│   │   ├── enums.py            # 状态枚举，与 CHECK 约束一一对应
+│   │   ├── models.py           # 4 张表的模型，镜像 init/01-schema.sql
+│   │   ├── session.py          # 引擎 / 会话工厂 / get_session 依赖
+│   │   └── types.py            # MySQL 物理类型（UNSIGNED / MEDIUMTEXT / DATETIME(3)）
 │   ├── api/                    # 接口层（FastAPI 惯例）
 │   │   ├── __init__.py         # 只导出 api_router
 │   │   ├── router.py           # 路由聚合（≈ 组件扫描的"手写替代品"）
@@ -230,6 +236,32 @@ decompose(user_id).created_at  # 不查库就知道这条记录什么时候建�
 - **时钟回拨超过 5ms 直接抛 `ClockMovedBackwardsError`**。宁可报错也不生成可能重复的 ID——小幅回拨（NTP 校时）会等待追上，不打断业务。
 
 纪元 `2024-01-01` 写死在代码里，不做成环境变量：能配置的东西就会被配错，而改纪元会让新旧 ID 撞车。
+
+### 数据访问层（app/db/）
+
+```python
+from app.db import Message, MessageRole, get_session
+
+
+async def create_message(session: AsyncSession, **kwargs) -> Message:
+    message = Message(role=MessageRole.USER, **kwargs)
+    session.add(message)
+    await session.commit()  # 提交点由业务决定，依赖不会替你提交
+    return message
+```
+
+四个设计决定，每个都对应一个具体的坑：
+
+| 决定 | 不这么做会怎样 |
+| --- | --- |
+| 表结构由 `init/01-schema.sql` 管，不用 `create_all()` | 应用启动时偷偷建表，改结构没人知道，迁移无从谈起 |
+| 关系全部 `lazy="raise"` | 异步里惰性加载抛 `MissingGreenlet`，报错栈完全看不出哪行触发 |
+| `get_session` 不自动提交 | 流式对话要分多次提交，统一提交语义对不上；且"忘写 commit"会变成"看起来成功了" |
+| `expire_on_commit=False` | commit 后属性过期，再访问触发同步 IO，在 async 里直接炸 |
+
+`tests/test_db_contract.py` 会连真实库比对 `information_schema`：表、列、物理类型、索引、约束名逐项核对。**它当场抓到过 6 处漂移**——三个 `deleted_at` 漏了 `DATETIME(3)`、两个累计 token 写成了 `INT` 而库里是 `BIGINT`、`refresh_token_hash` 模型写 `VARCHAR` 库里是 `CHAR`。这类不一致单测看不出来，只会在上线后炸。
+
+数据库没起时这些测试自动 skip，不会阻塞本地跑单测。
 
 ## 七、运行
 

@@ -26,6 +26,11 @@ dependencies:
       - langchain>=1.4
       - langchain-openai>=1.7
 
+      # 数据库（MySQL 8.4，异步驱动）
+      - sqlalchemy[asyncio]>=2.0
+      - aiomysql>=0.2
+      - cryptography>=42
+
       # 测试
       - pytest>=8.0
       - httpx>=0.27

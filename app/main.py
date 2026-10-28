@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import api_router
 from app.core.config import settings
+from app.db import dispose_engine
 
 
 @asynccontextmanager
@@ -23,7 +24,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     app.state.sse_shutdown = anyio.Event()
     yield
+    # 先让在途的流收尾（它们可能还要写库），再释放连接池
     app.state.sse_shutdown.set()
+    await dispose_engine()
 
 
 def create_app() -> FastAPI:
