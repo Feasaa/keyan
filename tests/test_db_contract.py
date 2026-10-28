@@ -252,3 +252,60 @@ def test_session_dependency_does_not_autocommit() -> None:
         pytest.skip(f"数据库不可达：{type(exc).__name__}")
 
     assert exists is False, "get_session 不应自动提交"
+
+
+# ------------------------------------------------------------ 运行时账号权限
+
+# 应用账号**不应该**拥有的权限。少一条，注入的后果就重一分：
+# 有了 DROP，一次成功注入就能删表；有了 CREATE，就能建表把数据搬走。
+# 注意别把裸的 "GRANT" 放进来 —— 每条 SHOW GRANTS 的结果都以 GRANT 开头，
+# 那样写等于永远命中，测试变成噪声。
+FORBIDDEN_PRIVILEGES = (
+    "ALL PRIVILEGES",
+    "CREATE",
+    "DROP",
+    "ALTER",
+    "INDEX",
+    "REFERENCES",
+    "TRIGGER",
+    "GRANT OPTION",
+)
+
+
+async def _current_user_grants() -> list[str]:
+    settings = get_settings()
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with engine.connect() as conn:
+            rows = (await conn.execute(text("SHOW GRANTS FOR CURRENT_USER()"))).all()
+            return [str(row[0]) for row in rows]
+    finally:
+        await engine.dispose()
+
+
+def test_runtime_account_has_no_ddl_privileges() -> None:
+    """运行时账号只能 DML，不能 DDL。
+
+    这是防注入的**第二道墙**：参数绑定是第一道，但它依赖"每个人都写对"。
+    把 DDL 权限从应用账号上摘掉之后，即使某天出现一处注入，
+    攻击者能做的也只有"以应用身份读写本库"，删表改结构都做不到。
+
+    这条不变量没有测试锁住的话，很容易被一句 `GRANT ALL` 悄悄撤销 ——
+    权限是"多给一点没关系"的典型场景，直到出事。
+
+    修法见 deploy/mysql/initdb/10-grants.sh。
+    """
+    if not get_settings().db_configured:
+        pytest.skip("未配置 DB_PASSWORD，跳过数据库契约测试")
+    try:
+        grants = asyncio.run(_current_user_grants())
+    except (SQLAlchemyError, OSError) as exc:
+        pytest.skip(f"数据库不可达：{type(exc).__name__}")
+
+    leaked = [
+        grant for grant in grants if any(word in grant.upper() for word in FORBIDDEN_PRIVILEGES)
+    ]
+    assert not leaked, (
+        "运行时账号仍然拥有 DDL 权限，注入一旦成功就能删表改结构。\n"
+        "请执行 deploy/mysql/initdb/10-grants.sh 收权，当前的授权是：\n" + "\n".join(grants)
+    )

@@ -47,9 +47,17 @@ class ErrorCode(Enum):
     BAD_GATEWAY = ErrorSpec(10502, 502, "上游服务异常")
     SERVICE_UNAVAILABLE = ErrorSpec(10503, 503, "服务暂时不可用")
 
-    # ---- 鉴权（1 1 xxx）----
+    # ---- 鉴权（1 1 xxx / 2 1 xxx）----
+    # X=1 是调用方能自己纠正的（密码错、码错、重复注册）；
+    # X=2 是服务端依赖的问题（邮件发不出去、功能没配）。
+    # 两类分开，前端才知道该让用户改输入、还是提示"稍后重试"。
+    AUTH_CODE_INVALID = ErrorSpec(11400, 400, "验证码不正确或已过期")
     UNAUTHORIZED = ErrorSpec(11401, 401, "未登录或登录已失效")
     FORBIDDEN = ErrorSpec(11403, 403, "没有权限执行该操作")
+    AUTH_EMAIL_TAKEN = ErrorSpec(11409, 409, "该邮箱已被注册")
+    AUTH_RATE_LIMITED = ErrorSpec(11429, 429, "操作过于频繁，请稍后再试")
+    AUTH_MAIL_SEND_FAILED = ErrorSpec(21502, 502, "验证码邮件发送失败")
+    AUTH_NOT_CONFIGURED = ErrorSpec(21503, 503, "鉴权功能未配置")
 
     # ---- 对话（2 2 xxx）----
     LLM_UPSTREAM_ERROR = ErrorSpec(22502, 502, "LLM 上游服务异常")

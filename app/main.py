@@ -14,7 +14,7 @@ from app.api import api_router
 from app.core.config import settings
 from app.core.exception_handlers import register_exception_handlers
 from app.core.middleware import RequestContextMiddleware
-from app.db import dispose_engine
+from app.db import close_redis, dispose_engine
 
 
 @asynccontextmanager
@@ -29,6 +29,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 先让在途的流收尾（它们可能还要写库），再释放连接池
     app.state.sse_shutdown.set()
     await dispose_engine()
+    await close_redis()
 
 
 def create_app() -> FastAPI:

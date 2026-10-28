@@ -1,18 +1,27 @@
-"""pytest 公共夹具：客户端 + LLM 桩（成功/失败两种）。
+"""pytest 公共夹具：客户端 + LLM 桩（成功/失败两种）+ 鉴权测试环境。
 
 桩只实现被调用到的方法（invoke / astream_events），与 LCEL 链同构，
 通过 dependency_overrides 注入，生产代码零改动。
 """
 
-from collections.abc import AsyncIterator, Callable
+import asyncio
+import contextlib
+import uuid
+from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
+from urllib.parse import quote_plus
 
 import pytest
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.main import app
 from app.services.llm_service import LLMService, get_llm_service
+from app.services.mail_service import get_mail_service
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, AIMessageChunk
+from redis.asyncio import Redis
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import create_async_engine
 
 
 class StubChain:
@@ -109,3 +118,191 @@ def failing_llm() -> Callable[..., None]:
         app.dependency_overrides[get_llm_service] = lambda: _make_service(chain, True)
 
     return install
+
+
+# --------------------------------------------------------------- 鉴权测试环境
+
+# 测试专用 Redis 库。用独立 db 索引，避免 flush 时清掉开发环境里的东西。
+TEST_REDIS_DB = 15
+# 测试用户邮箱前缀。收尾时按这个前缀清理，不碰开发库里的真实数据。
+TEST_EMAIL_PREFIX = "sr-test-"
+
+
+class StubMailService:
+    """捕获验证码，不真的发信。
+
+    为什么必须从这里取码：`/auth/verification-code` 刻意**不返回**验证码
+    （返回等于把"邮箱所有权"白送）。测试要拿到码，只能从发信这一侧截获 ——
+    这恰好证明了"邮件服务可替换"这个设计是有用的。
+    """
+
+    configured = True
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+
+    async def send_verification_code(
+        self, *, to: str, code: str, scene: str, ttl_seconds: int
+    ) -> None:
+        self.sent.append({"to": to, "code": code, "scene": scene, "ttl": ttl_seconds})
+
+    @property
+    def last_code(self) -> str:
+        assert self.sent, "还没有发出任何验证码"
+        return str(self.sent[-1]["code"])
+
+
+@pytest.fixture()
+def stub_mail() -> StubMailService:
+    stub = StubMailService()
+    # get_verification_service 依赖 get_mail_service，覆盖上游即可自动传导
+    app.dependency_overrides[get_mail_service] = lambda: stub
+    return stub
+
+
+@pytest.fixture()
+def make_email() -> Callable[[], str]:
+    """每个测试用独立邮箱，测试之间不共享状态。"""
+
+    def build() -> str:
+        return f"{TEST_EMAIL_PREFIX}{uuid.uuid4().hex[:12]}@example.com"
+
+    return build
+
+
+def _test_settings() -> Settings:
+    return get_settings().model_copy(
+        update={
+            "REDIS_DB": TEST_REDIS_DB,
+            # 测试会反复发码，把 IP 配额放大，免得配额错误盖住真正的断言。
+            # 配额本身在 test_verification.py 里单独测。
+            "VERIFICATION_HOURLY_LIMIT_PER_IP": 1000,
+            # 冷却缩到 1 秒：有些用例（比如"重复注册"）必须给同一个邮箱发两次码，
+            # 保持 60 秒会让每个这类用例都卡一分钟。
+            "VERIFICATION_CODE_RESEND_SECONDS": 1,
+        }
+    )
+
+
+def _patch_test_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    """把应用侧的 Redis 指向测试库。
+
+    两条路都要打：
+    - `dependency_overrides[get_settings]` —— 覆盖所有 `Depends(get_settings)`。
+      `Depends` 在**定义时**就捕获了函数对象，改模块属性对它无效。
+    - `app.db.redis.get_settings` —— 那是直接调用，不走依赖注入。
+
+    另一个好处：`get_redis()` 仍然在**应用的事件循环里**创建客户端。
+    如果由夹具在外部线程建好再注入，连接会绑在另一个 loop 上，
+    报错是 `attached to a different loop`，而且往往出现在毫不相干的测试里。
+    """
+    patched = _test_settings()
+    app.dependency_overrides[get_settings] = lambda: patched
+    monkeypatch.setattr("app.db.redis.get_settings", lambda: patched)
+    return patched
+
+
+@pytest.fixture()
+def test_redis_url() -> str:
+    """测试库的 DSN，供不经 HTTP 的用例自己建客户端。"""
+    settings = get_settings()
+    if not settings.redis_configured:
+        pytest.skip("未配置 REDIS_PASSWORD，跳过验证码测试")
+    password = quote_plus(settings.REDIS_PASSWORD)
+    return f"redis://:{password}@{settings.REDIS_HOST}:{settings.REDIS_PORT}/{TEST_REDIS_DB}"
+
+
+async def _purge_test_users() -> None:
+    """删除测试用户。
+
+    auth_sessions 对 users 是 ON DELETE CASCADE，删用户会级联清掉会话，
+    不用手动删两张表。
+    """
+    settings = get_settings()
+    engine = create_async_engine(settings.database_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                # LIKE 的模式串作为**绑定参数**传入，不是拼进 SQL 文本 ——
+                # 值里的 % 是字面量，不会被当成通配符以外的东西。
+                text("DELETE FROM users WHERE email LIKE :pattern"),
+                {"pattern": f"{TEST_EMAIL_PREFIX}%@example.com"},
+            )
+    finally:
+        await engine.dispose()
+
+
+async def _flush_test_redis() -> None:
+    """清掉测试库里的验证码 / 配额键。
+
+    不能用 FLUSHDB：它属于 Redis 的 @dangerous 分类，而 deploy 里的 ACL
+    是 `+@all -@dangerous`，会直接返回 NOPERM。
+    更坑的是"清理失败"如果被静默吞掉，计数器会跨轮次累加 ——
+    表现为"单跑能过、连着跑就 429"，而且查不出原因。
+    所以这里用 SCAN + DEL，两者都不在 @dangerous 里。
+    """
+    settings = get_settings()
+    client = Redis(
+        host=settings.REDIS_HOST,
+        port=settings.REDIS_PORT,
+        password=settings.REDIS_PASSWORD,
+        db=TEST_REDIS_DB,
+        decode_responses=True,
+    )
+    try:
+        stale = [key async for key in client.scan_iter(match="vc:*", count=500)]
+        if stale:
+            await client.delete(*stale)
+    finally:
+        await client.aclose()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_backends() -> Iterator[None]:
+    """整个测试会话前后各清一次测试库。
+
+    只在**测试专用**的 MySQL 数据（按邮箱前缀）和 Redis db 15 上操作，
+    不碰开发环境的其他数据。任一后端不可达时静默跳过，
+    让不依赖它们的用例照常跑。
+    """
+    settings = get_settings()
+
+    def purge() -> None:
+        if settings.db_configured:
+            with contextlib.suppress(SQLAlchemyError, OSError):
+                asyncio.run(_purge_test_users())
+        if settings.redis_configured:
+            # 这里故意不 suppress 所有异常：清理失败必须让测试红，
+            # 否则会以"跨轮次累积配额"的形式在别处爆出来，极难定位。
+            try:
+                asyncio.run(_flush_test_redis())
+            except Exception as exc:  # noqa: BLE001
+                pytest.exit(f"测试 Redis 清理失败，拒绝在不干净的环境里跑测试：{exc}")
+
+    purge()
+    yield
+    purge()
+
+
+@pytest.fixture()
+def auth_client(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_mail: StubMailService,
+) -> Iterator[TestClient]:
+    """鉴权接口专用的 TestClient。
+
+    注册/登录要写真实 MySQL，所以数据库不可用时直接 skip，
+    而不是让一堆用例报 500 把真正的失败埋掉。
+    """
+    settings = get_settings()
+    if not settings.db_configured:
+        pytest.skip("未配置 DB_PASSWORD，跳过鉴权接口测试")
+    if not settings.redis_configured:
+        pytest.skip("未配置 REDIS_PASSWORD，跳过鉴权接口测试")
+    if not settings.jwt_configured:
+        pytest.skip("未配置 JWT_SECRET，跳过鉴权接口测试")
+
+    _patch_test_settings(monkeypatch)
+    with TestClient(app) as test_client:
+        yield test_client
+    app.dependency_overrides.clear()

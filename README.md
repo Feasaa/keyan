@@ -2,7 +2,9 @@
 
 FastAPI + LangChain 的分层服务骨架。分层方式刻意对齐 Spring Boot 的习惯，如果你有 Spring 基础，可以按"同一职责、不同写法"来读。
 
-当前对外链路还是 **LLM 对话** 与 **健康检查** 两条，但底层基础设施已经铺好：雪花 ID、MySQL 表结构 + Alembic 迁移、统一响应外壳、业务错误码、全局异常处理。业务 CRUD（仓库层 / 服务层）还没接上，见[下一步](#十下一步可以练什么)。
+对外链路有三条：**邮箱注册登录**（`/api/v1/auth`）、**LLM 对话**（`/api/v1/chat`）、**健康检查**（`/api/v1/health`）。底层还铺好了雪花 ID、MySQL + Alembic 迁移、Redis、统一响应外壳、业务错误码、全局异常处理。
+
+鉴权部分是完整闭环：邮箱验证码 → 注册 → JWT access + 落库 refresh → 刷新轮换 → 登出撤销，含三层发码限流与账号枚举防护。
 
 ---
 
@@ -26,7 +28,11 @@ FastAPI + LangChain 的分层服务骨架。分层方式刻意对齐 Spring Boot
 | `MDC.put("traceId", ...)` + `Filter` | `app/core/context.py` 的 `ContextVar` + 纯 ASGI 中间件 | 请求级链路 ID |
 | JPA `@Entity` / `@Table` | `app/db/models.py` 的 `Mapped[...]` | 表模型 |
 | Flyway / Liquibase（不用 `ddl-auto`） | `alembic/versions/` | 表结构变更（本项目禁用 `create_all`） |
-| `@Repository` | `app/db/session.py` 的 `get_session`（仓库层待建） | 数据访问 |
+| `@Repository` | `app/repositories/*.py` | 数据访问，SQL 的唯一落点 |
+| `BCryptPasswordEncoder` | `app/core/security.py` 的 `hash_password` / `verify_password` | 密码哈希（argon2id） |
+| `JwtUtil` + `JwtAuthenticationFilter` | `app/core/security.py` + `app/api/deps.py` 的 `get_current_user` | 令牌签发与解析 |
+| `@AuthenticationPrincipal` | `CurrentUser` 类型别名 | 取当前登录用户 |
+| Spring Security 的 `SessionRegistry` | `auth_sessions` 表 | 可撤销的登录态（refresh token） |
 | springdoc（Swagger UI） | 内置 `/docs`（Swagger）、`/redoc` | 接口文档 |
 | `pom.xml` / `build.gradle` | `pyproject.toml` + `requirements.txt` / `environment.yml` | 依赖与构建 |
 | `src/test/java` + `@SpringBootTest` + `MockMvc` | `tests/` + `TestClient` | 测试 |
@@ -49,6 +55,7 @@ sr/
 │   │   ├── context.py          # 请求级 ContextVar（trace_id）
 │   │   ├── middleware.py       # trace_id 中间件（纯 ASGI，不缓冲 SSE）
 │   │   ├── exception_handlers.py  # 四类异常的集中翻译（≈ @ControllerAdvice）
+│   │   ├── security.py         # 密码哈希（argon2id）+ 令牌签发/校验（≈ BCryptPasswordEncoder + JwtUtil）
 │   │   ├── snowflake.py        # 雪花 ID 生成器（时间有序、多实例不冲突）
 │   │   └── sse.py              # SSE 事件名与结束哨兵（帧编码交给 sse-starlette）
 │   ├── prompts/                # 提示词（正文是文件，不是代码常量）
@@ -60,29 +67,45 @@ sr/
 │   │   ├── enums.py            # 状态枚举，与 CHECK 约束一一对应
 │   │   ├── models.py           # 4 张表的模型，与 alembic/versions 保持一致
 │   │   ├── session.py          # 引擎 / 会话工厂 / get_session 依赖
+│   │   ├── redis.py            # Redis 客户端（验证码 / 限流计数）
 │   │   └── types.py            # MySQL 物理类型（UNSIGNED / MEDIUMTEXT / DATETIME(3)）
+│   ├── repositories/           # SQL 的唯一落点（≈ @Repository）
+│   │   ├── user_repository.py          # 用户读写 + 软删除过滤
+│   │   └── auth_session_repository.py  # refresh token 会话（按哈希查）
 │   ├── api/                    # 接口层（FastAPI 惯例）
 │   │   ├── __init__.py         # 只导出 api_router
 │   │   ├── router.py           # 路由聚合（≈ 组件扫描的"手写替代品"）
+│   │   ├── deps.py             # 依赖装配 + get_current_user（≈ @AuthenticationPrincipal）
 │   │   └── routes/             # 一个资源一个文件
+│   │       ├── auth.py         # 发码 / 注册 / 登录 / 刷新 / 登出 / 当前用户
 │   │       ├── health.py       # 存活探针 + 就绪探针
 │   │       └── chat.py         # 一次性对话 + SSE 流式对话 + 状态
 │   ├── schemas/                # 接口契约 DTO（≈ dto/vo 包）
+│   │   ├── auth.py             # 邮箱归一化 + 密码长度策略
 │   │   ├── health.py
 │   │   └── chat.py
 │   ├── services/               # 业务逻辑（≈ @Service）
 │   │   ├── exceptions.py       # 业务异常语义
+│   │   ├── auth_service.py     # 注册 / 登录 / 刷新 / 登出（事务边界在这里）
+│   │   ├── verification_service.py  # 验证码签发与校验 + 三层限流
+│   │   ├── mail_service.py     # 异步 SMTP 发信
 │   │   └── llm_service.py      # LangChain LCEL 链封装（invoke / astream_events）
-│   └── utils/                  # 通用工具（≈ common/util 包，当前为空）
+│   └── utils/                  # 通用工具（≈ common/util 包）
+│       ├── net.py              # IP ↔ VARBINARY(16)
+│       └── masking.py          # 日志脱敏（邮箱 / 令牌）
 ├── tests/                      # 测试（≈ src/test/java）
-│   ├── conftest.py             # TestClient + LLM 桩夹具
+│   ├── conftest.py             # TestClient + LLM 桩 + 邮件桩 + 测试库隔离
 │   ├── test_health.py          # 探针 + 统一响应外壳
 │   ├── test_chat.py            # 一次性 / 流式对话
 │   ├── test_prompts.py         # 提示词加载与热更新
 │   ├── test_errors.py          # 错误码编码规则 + 四类异常路径
+│   ├── test_auth.py            # 注册 / 登录 / 刷新 / 登出 / 账号枚举防护
+│   ├── test_security.py        # 密码哈希 + JWT（含 alg=none 伪造）
+│   ├── test_verification.py    # 验证码一次性 / 过期 / 冷却 / 双层配额
+│   ├── test_sql_injection.py   # 源码 AST 扫描 + 运行时注入载荷
 │   ├── test_snowflake.py       # 并发唯一性 + 位布局 + 时钟回拨
 │   ├── test_models.py          # 纯 metadata 断言（物理类型 / 约束名）
-│   └── test_db_contract.py     # 连真库比对 information_schema（无库自动 skip）
+│   └── test_db_contract.py     # 连真库比对 information_schema + 权限收权校验
 ├── alembic/                    # 数据库迁移（表结构的唯一真相源）
 │   ├── env.py                  # 复用 app 的配置与模型，DSN 不写进 ini
 │   ├── script.py.mako          # 迁移模板（已改成项目风格，生成即过 ruff）
@@ -91,6 +114,7 @@ sr/
 │   ├── docker-compose.yml      # MySQL 8.4 LTS + Redis 7.4
 │   ├── .env.example            # 复制成 deploy/.env 后填密码
 │   ├── mysql/conf.d/01-server.cnf  # 字符集 / 时区 / 慢查询 / sql_mode
+│   ├── mysql/initdb/10-grants.sh   # 账号收权：运行时只给 DML，DDL 归迁移账号
 │   └── redis/redis.conf        # AOF / volatile-lru / ACL 收权
 ├── environment.yml             # conda 环境定义
 ├── requirements.txt            # pip 依赖
@@ -113,9 +137,11 @@ sr/
 
 **`app/schemas/`** — 出入参契约。独立于任何存储结构：接口返回常常是拼装结果，且内部字段（密钥、审计字段）绝不能返回给前端。对应 Spring 的 DTO/VO 分层。
 
-**`app/services/`** — 业务规则的唯一归宿：可复用、可单测（不依赖 HTTP）、隔离框架（换 Web 框架不用重写业务）。LLM 的链构建、降级、超时重试全部收敛在这里，接口层只做协议适配。对应 `@Service`。
+**`app/repositories/`** — SQL 的唯一落点，一表一仓库。存在的意义有两个：一是"防注入"这条规则只需要在一个地方守住（见[防 SQL 注入](#防-sql-注入四层参数绑定只是第一层)）；二是软删除过滤、字段白名单这类**漏一次就是漏洞**的细节，写进仓储就不会被某个调用方忘掉。对应 `@Repository`。
 
-**`tests/`** — 测试锁住的是**接口契约**而不是实现。LLM 用桩链替换，不花钱、不依赖网络、结果可断言。
+**`app/services/`** — 业务规则的唯一归宿：可复用、可单测（不依赖 HTTP）、隔离框架（换 Web 框架不用重写业务）。LLM 的链构建、降级、超时重试，以及注册/登录的事务边界，全部收敛在这里，接口层只做协议适配。对应 `@Service`。
+
+**`tests/`** — 测试锁住的是**接口契约**而不是实现。LLM 用桩链、邮件用桩服务替换，不花钱、不依赖网络、结果可断言。
 
 ---
 
@@ -326,10 +352,16 @@ uvicorn app.main:app --reload --port 8000
 
 | 地址 | 说明 |
 | --- | --- |
-| http://127.0.0.1:8000/docs | Swagger UI，可直接调试接口 |
+| http://127.0.0.1:8000/docs | Swagger UI，可直接调试接口（右上角 Authorize 可填令牌） |
 | http://127.0.0.1:8000/redoc | ReDoc 文档 |
 | http://127.0.0.1:8000/api/v1/health | 存活探针（liveness） |
 | http://127.0.0.1:8000/api/v1/health/ready | 就绪探针（readiness） |
+| POST http://127.0.0.1:8000/api/v1/auth/verification-code | 发邮箱验证码 |
+| POST http://127.0.0.1:8000/api/v1/auth/register | 邮箱注册 |
+| POST http://127.0.0.1:8000/api/v1/auth/login | 邮箱密码登录 |
+| POST http://127.0.0.1:8000/api/v1/auth/refresh | 刷新令牌 |
+| POST http://127.0.0.1:8000/api/v1/auth/logout | 登出 |
+| GET http://127.0.0.1:8000/api/v1/auth/me | 当前登录用户 |
 | http://127.0.0.1:8000/api/v1/chat/status | 对话功能状态（是否已配置密钥） |
 | POST http://127.0.0.1:8000/api/v1/chat | 对话，一次性返回 |
 | POST http://127.0.0.1:8000/api/v1/chat/stream | 对话，SSE 流式返回 |
@@ -350,9 +382,13 @@ ruff format --check .               # 格式检查（CI 用）
 ruff format .                       # 真正格式化
 ```
 
-测试用桩链替换 LLM 服务（`dependency_overrides[get_llm_service]`，对应 Spring 的 `@MockBean`），不依赖外部网络，随时可跑。
+测试用桩链替换 LLM 服务、用桩邮件服务截获验证码（`dependency_overrides[...]`，对应 Spring 的 `@MockBean`），不依赖外部网络，随时可跑。
 
-`tests/test_db_contract.py` 是**契约测试**：连真实库，把 `information_schema` 里的列类型、索引、约束名跟 `Base.metadata` 逐项比对。库没起时自动 skip，起了就一定跑 —— 这是唯一能拦住"模型改了、迁移没生成"这类漂移的东西。
+`tests/test_db_contract.py` 是**契约测试**：连真实库，把 `information_schema` 里的列类型、索引、约束名跟 `Base.metadata` 逐项比对，另外校验运行时账号确实没有 DDL 权限。库没起时自动 skip，起了就一定跑 —— 这是唯一能拦住"模型改了、迁移没生成""权限被悄悄放开"这类漂移的东西。
+
+鉴权相关用例需要 MySQL + Redis：注册要真写库（唯一约束、事务边界、级联删除用假的测不出来），验证码要真 TTL 和真 `INCR`。跑在**独立的 Redis db 15** 上，用 `SCAN` + `DEL` 清理（`FLUSHDB` 属于 `@dangerous`，被 ACL 拒），MySQL 侧只删邮箱前缀为 `sr-test-` 的行，不碰开发数据。任一后端不可达时整组 skip。
+
+> 注意：如果清理 Redis 失败，测试会**直接退出**而不是继续跑。否则配额计数会跨轮次累积，表现为"单跑能过、连着跑就 429"，极难定位。
 
 ## 九、接口契约
 
@@ -396,10 +432,18 @@ ruff format .                       # 真正格式化
 | `10422` | 422 | 参数校验失败（`data.errors` 里逐字段说明） |
 | `10429` | 429 | 请求过于频繁 |
 | `10500` | 500 | 服务内部异常 |
-| `11401` / `11403` | 401 / 403 | 未登录 / 无权限 |
+| `11400` | 400 | 验证码不正确或已过期 |
+| `11401` | 401 | 未登录 / 登录已失效 / 邮箱或密码不正确 |
+| `11403` | 403 | 账号被停用 |
+| `11409` | 409 | 该邮箱已被注册 |
+| `11429` | 429 | 发码或试错过于频繁 |
+| `21502` | 502 | 验证码邮件发送失败 |
+| `21503` | 503 | 鉴权功能未配置（缺 JWT_SECRET / SMTP / Redis） |
 | `22502` | 502 | LLM 上游异常 |
 | `22503` | 503 | LLM 未配置 |
 | `22504` | 504 | LLM 上游超时 |
+
+`11401` 同时覆盖"令牌失效""密码错"和"邮箱不存在"，是刻意的：这三种情况客户端动作完全一样（回登录页），区分只会泄露实现细节。同理 `11400` 不区分"码错"和"码过期"。
 
 ### 异常怎么走
 
@@ -413,6 +457,131 @@ ruff format .                       # 真正格式化
 所以业务代码里不写 `HTTPException`，直接抛 `LLMUpstreamError(...)` 之类即可 —— 路由层看不到一个状态码。
 
 **兜底 handler 必须存在**：没有它，未预期异常会走 Starlette 默认的纯文本 500，既不是统一结构，DEBUG 模式下还会把堆栈直接返回给客户端。
+
+### 鉴权（/api/v1/auth）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/auth/verification-code` | 发 6 位邮箱验证码（Redis 存哈希，5 分钟有效） |
+| POST | `/auth/register` | 邮箱 + 密码 + 码，验过即建号并直接返回令牌 |
+| POST | `/auth/login` | 邮箱 + 密码 |
+| POST | `/auth/refresh` | refresh_token 换一对新令牌，旧的立刻作废 |
+| POST | `/auth/logout` | 撤销 refresh_token（幂等） |
+| GET | `/auth/me` | 拿 access_token 换当前用户 |
+
+```bash
+# 1. 发码
+curl -X POST http://127.0.0.1:8000/api/v1/auth/verification-code \
+  -H 'Content-Type: application/json' -d '{"email":"you@qq.com"}'
+# {"code":0,"message":"验证码已发送，请查收邮件",
+#  "data":{"email":"you@qq.com","expires_in":300,"resend_after":60},"trace_id":"..."}
+
+# 2. 注册（code 填邮件里那 6 位）
+curl -X POST http://127.0.0.1:8000/api/v1/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"you@qq.com","password":"correct horse battery staple","code":"123456"}'
+
+# 3. 之后每个请求带令牌
+curl http://127.0.0.1:8000/api/v1/auth/me -H "Authorization: Bearer <access_token>"
+```
+
+**令牌为什么是 access(JWT) + refresh(落库) 两件套**
+
+| | access_token | refresh_token |
+| --- | --- | --- |
+| 形态 | JWT，自包含 | 32 字节随机串 |
+| 存哪 | 不落库 | 库里只存 sha256 |
+| 有效期 | 15 分钟 | 30 天 |
+| 能否撤销 | 不能，到期自然失效 | 能，`revoked_at` 一写就废 |
+| 用途 | 每个请求的 Authorization 头 | 只在换票时用一次 |
+
+纯 JWT 的软肋是"登出后旧 token 还能用"，纯 session 的软肋是"每请求查一次库"。分开用各取所长：access 短到 15 分钟，即使泄露也就这么久；refresh 落库，所以"立刻踢人"是可行的。
+
+**refresh 每次换票都轮换**，旧的立刻作废。不轮换的话，refresh token 一旦被复制走就永久有效，而且服务端没有任何信号能发现"同一份凭证在两个地方用"。
+
+**登录接口的三个防枚举细节**（`tests/test_auth.py` 逐条锁住）
+
+1. 邮箱不存在和密码错误返回**完全相同**的响应 —— 状态码、错误码、文案都一致。
+2. 邮箱不存在时也跑一次 argon2 校验（`dummy_hash()`），把耗时拉平。不做这一步，登录接口就是个**时序预言机**：邮箱存在 50ms、不存在 1ms，不看响应内容、只看耗时就能批量探测哪些邮箱注册过。
+3. 账号状态检查放在密码校验**之后**。反过来，"账号已被停用"这句话本身就泄露了账号存在。
+
+**注册为什么"先消费验证码，再查邮箱是否已注册"**
+
+反过来的话，不掌握该邮箱的人也能通过"是否报邮箱已占用"批量探测注册情况。先验证码后查重，攻击者必须先能收到邮件才问得出答案。
+
+**密码策略：8–128 位，不限字符类型。**
+
+这不是偷懒，是 NIST SP 800-63B 的建议：强制大小写数字符号混排会把人逼向 `Passw0rd!` 这类可预测变形，实际熵反而下降；长度才直接决定搜索空间。真正的防护是限制尝试次数，本项目在登录（验证码试错上限）和发码（三层配额）两侧都有。
+
+上限 128 是防 DoS：密码长度直接进哈希函数的计算量，不设上限时一个 1MB 的"密码"能占满一个核。
+
+**密码哈希用 argon2id，bcrypt 只保留校验能力。** 登录时按密文前缀分流，旧算法验过之后顺手把新密文写回库 —— 用户无感，也不需要批量迁移脚本。不用 passlib 是因为它依赖 Python 3.13 已移除的 `crypt` 模块，import 阶段就炸。
+
+### 验证码：邮箱验证码自建，人机验证先不接
+
+**邮箱验证码走 Redis 自建**，理由是和注册动作在同一个事务语义里 —— 校验通过才能建号。第三方验证码服务通常只给"校验通过"的票据，跨系统对账会引入"码验过了但建号失败了"这类中间态。既然已经有 Redis，自建成本更低。
+
+四个设计点：
+
+1. **存哈希不存明文。** Redis 常被配成无密码、可远程访问，`KEYS vc:*` 就能 dump。存明文等于一次配置失误把所有在途验证码公开。这里用 sha256 而不是 argon2 —— 6 位数字只有 100 万种可能，慢哈希也挡不住离线穷举，真正的作用只是"不直接可读"。防穷举靠的是**在线**的试错次数限制。
+2. **三层限流，缺一层都能被打穿**：60 秒冷却（防连点/轰炸）、每邮箱每日上限（换 IP 也没用）、每 IP 每小时上限（换邮箱也没用）。
+3. **试错 5 次即作废。** 6 位数字在 5 分钟有效期内不限次是能被脚本穷举完的。`INCR` 是原子的，所以并发爆破也会被这个计数挡住。
+4. **发信失败要把冷却一起清掉**，否则用户看到"发送失败"，想重试却被自己的 60 秒冷却挡在门外。
+
+**人机验证这层建议先不接**，理由：注册场景的滥用成本主要由发信配额决定，上面三层限流已经挡住绝大部分；而极验 / Turnstile 都需要先开通账号拿 key，属于"外部依赖 + 按量计费"的决策，不该在功能主链路还没跑通时引入。
+
+真要接的话，按场景选：
+
+| 方案 | 适合 | 代价 |
+| --- | --- | --- |
+| **极验 GeeTest v4** | 国内用户为主 | 企业账号 + 按量计费，国内体验最好 |
+| **Cloudflare Turnstile** | 海外用户为主 | 免费、多数场景无感通过，国内到 challenges.cloudflare.com 偶有波动 |
+| 自建图片验证码 | 零第三方依赖 | OCR 很容易破、无障碍差，只挡最粗糙的脚本 |
+| reCAPTCHA | 已有 Google 生态 | 国内基本不可用 |
+
+接入点在 `VerificationService.issue()` 的最前面 —— 在消耗任何配额之前校验票据，避免"人机没过却已经花掉一次发信配额"。
+
+### 防 SQL 注入：四层，参数绑定只是第一层
+
+| 层 | 手段 | 在本项目哪里 |
+| --- | --- | --- |
+| 1 | **参数绑定**，值永远不进 SQL 文本 | 所有查询走 ORM 表达式；原生 SQL 用 `text("... = :name")` + 参数字典 |
+| 2 | **入口校验**，把输入形状收敛 | Pydantic `EmailStr`（拒 CRLF，顺带堵住 SMTP 头注入）、`code` 的 `^\d{6}$`、长度上限 |
+| 3 | **账号最小权限**，DDL 从运行时账号上摘掉 | `deploy/mysql/initdb/10-grants.sh` |
+| 4 | **错误不泄露 SQL** | 全局兜底 500 只回中性文案，堆栈只进日志 |
+
+第 1 层能生效是因为 SQLAlchemy 把 `WHERE email = %s` 和值**分开**传给驱动 —— 注入串只会被当成"一个长得奇怪的字符串"。`tests/test_sql_injection.py` 里有一条测试直接把编译后的语句打出来验证这一点。
+
+第 2 层是"顺手"的收益：`EmailStr` 会拒绝含换行的地址，这恰好也堵住了"往 Subject 里塞 `Bcc:`"这类 SMTP 头注入。
+
+第 3 层最容易被忽略，但收益最大：`app` 账号只有 `SELECT/INSERT/UPDATE/DELETE`，即使前两层都被绕过，攻击者也删不掉表、改不了结构、读不到其他库。
+
+```sql
+-- 收权后的样子（SHOW GRANTS FOR CURRENT_USER()）
+GRANT USAGE ON *.* TO `app`@`%`
+GRANT SELECT, INSERT, UPDATE, DELETE ON `agent\_chat`.* TO `app`@`%`
+```
+
+第 1 层还有一个容易被破坏的地方：**`text(f"...")`**。它长得和正常代码几乎一样，写的人往往觉得"这是内部变量，安全"。所以 `tests/test_sql_injection.py` 用 **AST** 扫源码，凡是把 f-string / `+` / `%` / `.format()` 交给 `text` / `execute` / `literal_column` 的一律失败。用 AST 而不是正则，是因为正则会把注释和 docstring 里的示例也算进去 —— 那种测试最后一定会被人加 skip。
+
+### 数据库账号权限（防注入的第二道墙）
+
+`deploy/mysql/initdb/10-grants.sh` 把账号拆成两个：
+
+| 账号 | 权限 | 谁用 |
+| --- | --- | --- |
+| `app`（运行时） | `SELECT / INSERT / UPDATE / DELETE` | 应用进程 |
+| `migrator`（迁移） | `ALL`（含 DDL） | 只给 `alembic` 用 |
+
+`alembic/env.py` 读 `DB_MIGRATION_USER`，不配就退回运行时账号 —— 本地图方便，但那种情况下 `app` 必然带着 DDL 权限，生产别这么干。
+
+这个脚本只在**首次**初始化数据目录时自动执行（volume 为空）。已有数据的环境要手动跑一次：
+
+```bash
+docker exec agent-chat-mysql bash /docker-entrypoint-initdb.d/10-grants.sh
+```
+
+`tests/test_db_contract.py::test_runtime_account_has_no_ddl_privileges` 会校验这条不变量。没有测试锁住的话，一句 `GRANT ALL` 就能把它悄悄撤销 —— 权限是"多给一点没关系"的典型场景，直到出事。
 
 ### 对话（/api/v1/chat，LangChain LCEL 链）
 
@@ -569,13 +738,15 @@ curl.exe http://127.0.0.1:8000/api/v1/chat/status
 
 ## 十、下一步可以练什么
 
-按由易到难（统一返回、异常处理、错误码、表结构、迁移已经做完了，下面接在后面）：
+按由易到难（统一返回、异常处理、错误码、表结构、迁移、仓库层、鉴权已经做完了，下面接在后面）：
 
 1. **SSE 断线续传**：给每帧带 `id:`，客户端重连时用 `Last-Event-ID` 续传，对应 SSE 规范里的重连语义。
 2. **LLM 结构化输出**：`.with_structured_output(PydanticModel)` 替换 `StrOutputParser`，做实体抽取。
-3. **仓库层 + 服务层**：`app/repositories/` 只做数据访问（一表一仓库），`app/services/` 只做业务编排。路由不直接碰 `AsyncSession`，对应 Spring 的 `@Repository` / `@Service` 分层。
-4. **流式落库**：对话时先写一条 `status=STREAMING` 的 `Message`，流结束改 `COMPLETED`；Redis 做增量缓冲，断线重连能从 DB 续上。
-5. **就绪探针加 DB / Redis**：现在 `/health/ready` 只看配置，应该真跑一次 `SELECT 1` 和 `PING`，失败返回 503。
-6. **鉴权**：`OAuth2PasswordBearer` + JWT，用 `Depends` 做"当前用户"依赖，对应 Spring Security 的 Filter + `@AuthenticationPrincipal`。表里 `users` / `auth_sessions` 已经预留好了。
-7. **加 RAG**：文档切分 → 向量库（如 pgvector / Chroma）→ retriever 接进链，`prompt | retriever` 组合。
+3. **对话接口挂鉴权**：`/api/v1/chat` 现在不要求登录，接上 `CurrentUser` 后把 `user_id` 从令牌里取，`conversations` / `messages` 才有真正的归属。
+4. **流式落库**：对话时先写一条 `status=STREAMING` 的 `Message`，流结束改 `COMPLETE`；Redis 做增量缓冲，断线重连能从 DB 续上。
+5. **就绪探针加 DB / Redis**：现在 `/health/ready` 只看 LLM 配置，应该真跑一次 `SELECT 1` 和 `PING`，失败返回 503。
+6. **登录失败次数限制**：验证码侧有三层限流，密码登录侧还没有 —— 现在只靠 argon2 的计算成本，没有按账号/IP 的失败计数与锁定。
+7. **忘记密码**：`VerificationScene` 加一个 `RESET_PASSWORD`（Redis key 自动隔离），复用同一套发码与校验，再加一个 `POST /auth/reset-password`。表里再加 `email_verified_at` 就能支撑"改邮箱需重新验证"。
+8. **人机验证**：真要接就挂 `VerificationService.issue()` 最前面（在消耗配额之前校验票据），见上一节的选择表。
+9. **加 RAG**：文档切分 → 向量库（如 pgvector / Chroma）→ retriever 接进链，`prompt | retriever` 组合。
 

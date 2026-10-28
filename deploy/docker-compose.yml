@@ -22,16 +22,23 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD 未设置，请先复制 .env.example 为 .env}
       MYSQL_USER: ${MYSQL_USER:-app}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD 未设置}
+      # 迁移专用账号：拥有 DDL，只在 alembic 里用。
+      # 运行时账号（MYSQL_USER）会被收权成只有 DML，见 mysql/initdb/10-grants.sh。
+      # 留空 = 不收权（本地图省事），生产必须配。
+      MYSQL_MIGRATOR_USER: ${MYSQL_MIGRATOR_USER:-migrator}
+      MYSQL_MIGRATOR_PASSWORD: ${MYSQL_MIGRATOR_PASSWORD:-}
       TZ: UTC
     ports:
       - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
     volumes:
       # 命名卷：数据在卷里，容器可随时重建。删数据请显式 docker compose down -v
       - mysql-data:/var/lib/mysql
-      # 这里不再挂 docker-entrypoint-initdb.d：表结构由 Alembic 管理。
+      # 这里**只放权限脚本，不放 DDL**。表结构仍然只由 Alembic 管理：
       # 两处都定义 schema 必然漂移（实测注释和索引就对不上），
       # 而且 alembic_version 和自建的 schema_migrations 会互相打架。
       # 建表请执行：alembic upgrade head
+      # 注意 initdb 只在数据目录为空时执行一次，已有数据的库要手动跑一次。
+      - ./mysql/initdb:/docker-entrypoint-initdb.d:ro
       # 注意挂到 conf.d-src 而不是 /etc/mysql/conf.d：
       #   1) 直接挂 conf.d 会覆盖镜像自带的 mysql.cnf / mysqldump.cnf；
       #   2) 更要命的是 Windows 上 bind mount 权限恒为 0777，

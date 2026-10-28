@@ -32,6 +32,15 @@ dependencies:
       - cryptography>=42
       - alembic>=1.13
 
+      # 鉴权（argon2id 哈希 + JWT + 邮箱校验）
+      - pwdlib[argon2,bcrypt]>=0.2
+      - pyjwt>=2.8
+      - email-validator>=2.1
+
+      # Redis（验证码 / 限流）与异步 SMTP
+      - redis[hiredis]>=5.1
+      - aiosmtplib>=3.0
+
       # 测试
       - pytest>=8.0
       - httpx>=0.27

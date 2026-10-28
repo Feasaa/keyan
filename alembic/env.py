@@ -66,10 +66,16 @@ def include_object(
 
 
 def _database_url() -> str:
+    """迁移用 DSN。
+
+    优先用 DB_MIGRATION_USER（DDL 权限），运行时账号 DB_USER 只有 DML ——
+    这一层隔离的意义：即使将来出现一处 SQL 注入，攻击者拿到的也只是
+    应用账号，删不了表、改不了结构、读不到其他库。
+    """
     settings = get_settings()
     if not settings.db_configured:
         raise RuntimeError("数据库未配置：请在 .env 里设置 DB_PASSWORD")
-    return settings.database_url
+    return settings.migration_url
 
 
 def run_migrations_offline() -> None:

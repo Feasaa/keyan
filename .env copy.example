@@ -33,3 +33,53 @@ PROMPT_CHAT_SYSTEM_ID=chat_system
 # ---- 雪花 ID ----
 # 机器号 0-1023。单实例填 0；多实例部署时每台必须不同，否则会生成相同 ID。
 SNOWFLAKE_WORKER_ID=0
+
+# ---- 数据库 ----
+# 运行时账号：已被收权成只有 SELECT/INSERT/UPDATE/DELETE（见 deploy/mysql/initdb）
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_USER=app
+DB_PASSWORD=
+DB_NAME=agent_chat
+DB_ECHO=false
+
+# 迁移账号：只有它拥有 DDL，alembic 用这个。
+# 不配会退回运行时账号 —— 那种情况下 app 账号必然带着 DDL 权限，生产别这么干。
+DB_MIGRATION_USER=migrator
+DB_MIGRATION_PASSWORD=
+
+# ---- Redis（验证码 / 限流）----
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+REDIS_PASSWORD=
+REDIS_DB=0
+
+# ---- 鉴权 ----
+# 生成：python -c "import secrets; print(secrets.token_urlsafe(48))"
+# 留空 = 鉴权功能关闭（/api/v1/auth/* 返回 503），其余接口不受影响。
+# 换掉密钥后已签发的 access token 全部失效，属于预期行为。
+JWT_SECRET=
+# access 短、refresh 长。access 不落库，泄露后最多被用这么久。
+ACCESS_TOKEN_TTL_SECONDS=900
+REFRESH_TOKEN_TTL_SECONDS=2592000
+
+# ---- 邮件（QQ / 163 / 任意标准 SMTP）----
+# SMTP_PASSWORD 填**授权码**，不是邮箱登录密码。
+# QQ 邮箱：设置 → 账户 → POP3/SMTP 服务 → 生成授权码
+# 465 = 隐式 SSL，587 = STARTTLS，按端口自动判定
+SMTP_HOST=smtp.qq.com
+SMTP_PORT=465
+SMTP_USER=
+SMTP_PASSWORD=
+SMTP_FROM_NAME=AI 助手
+SMTP_TIMEOUT_SECONDS=10
+
+# ---- 邮箱验证码 ----
+# TTL 是"码多久失效"，RESEND 是"多久能再要一个"，两者不是一回事
+VERIFICATION_CODE_TTL_SECONDS=300
+VERIFICATION_CODE_RESEND_SECONDS=60
+# 同一个码允许试错几次。6 位数字在有效期内不限次是能被穷举的。
+VERIFICATION_CODE_MAX_ATTEMPTS=5
+# 两层配额：按邮箱防单点轰炸，按 IP 防换邮箱刷
+VERIFICATION_DAILY_LIMIT_PER_EMAIL=10
+VERIFICATION_HOURLY_LIMIT_PER_IP=20

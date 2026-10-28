@@ -49,7 +49,12 @@ class User(Base):
     id: Mapped[int] = mapped_column(
         SnowflakeID, primary_key=True, autoincrement=False, comment="雪花 ID"
     )
-    username: Mapped[str] = mapped_column(String(64), comment="登录账号")
+    # 邮箱注册不产生 username，所以允许为空。
+    # MySQL 的唯一索引允许多个 NULL，不会因为"都是 NULL"而互相冲突 ——
+    # 换成空字符串就不行了：第二个空串用户会直接撞 uk_users_username。
+    username: Mapped[str | None] = mapped_column(
+        String(64), default=None, comment="登录账号；邮箱注册的用户为 NULL"
+    )
     email: Mapped[str | None] = mapped_column(String(255), default=None, comment="可选登录方式")
     # 255 而不是 60：bcrypt 是 60 字符，argon2id 约 100。
     # 留宽度是为了将来换算法不用改表，登录时按 $2b$ / $argon2id$ 前缀分流。

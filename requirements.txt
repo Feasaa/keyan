@@ -22,6 +22,20 @@ cryptography>=42
 # 迁移：表结构的唯一真相源
 alembic>=1.13
 
+# 鉴权
+# pwdlib 是 passlib 的替代品：passlib 1.7.4 依赖 Python 3.13 已移除的 crypt 模块，
+# 且与 bcrypt 4.x 不兼容。这里同时装 argon2（新密码）与 bcrypt（校验历史密文）。
+pwdlib[argon2,bcrypt]>=0.2
+pyjwt>=2.8
+# Pydantic 的 EmailStr 靠它做真正的邮箱校验（含 CRLF 注入拦截）
+email-validator>=2.1
+
+# Redis：验证码、限流计数
+redis[hiredis]>=5.1
+
+# 邮件：异步 SMTP（aiosmtplib 等待期间不占线程）
+aiosmtplib>=3.0
+
 # 开发 / 测试依赖
 pytest>=8.0
 httpx>=0.27
