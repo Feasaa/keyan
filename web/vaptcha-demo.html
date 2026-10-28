@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VAPTCHA 接入联调 · sr</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --border: #e3e6ec;
+    --text: #1d2129;
+    --muted: #6b7280;
+    --brand: #2563eb;
+    --brand-dark: #1d4ed8;
+    --ok: #15803d;
+    --ok-bg: #eaf7ee;
+    --err: #b91c1c;
+    --err-bg: #fdecec;
+    --warn: #a16207;
+    --warn-bg: #fdf6e3;
+    --code-bg: #0f172a;
+    --code-text: #d7e2f1;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 20px 60px; }
+  header h1 { font-size: 21px; margin: 0 0 6px; letter-spacing: .2px; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+  .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; margin-top: 20px; align-items: start; }
+  @media (max-width: 980px) { .cols { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    margin-bottom: 14px;
+  }
+  .card h2 {
+    font-size: 14px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px;
+    font-weight: 600;
+  }
+  .step-no {
+    display: inline-flex; width: 20px; height: 20px; border-radius: 50%;
+    background: var(--brand); color: #fff; font-size: 12px;
+    align-items: center; justify-content: center; flex: 0 0 auto;
+  }
+  .card.done h2 .step-no { background: var(--ok); }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px;
+    font: inherit; background: #fff; color: var(--text);
+  }
+  input:focus { outline: 2px solid #bfdbfe; border-color: var(--brand); }
+  .row { display: flex; gap: 10px; }
+  .row > * { flex: 1; min-width: 0; }
+  button {
+    margin-top: 14px; padding: 9px 16px; border: 0; border-radius: 7px;
+    background: var(--brand); color: #fff; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:hover { background: var(--brand-dark); }
+  button:disabled { background: #9ca3af; cursor: not-allowed; }
+  button.ghost { background: #eef2ff; color: var(--brand-dark); }
+  button.ghost:hover { background: #e0e7ff; }
+
+  #vaptcha-container { min-height: 46px; margin-top: 8px; display: flex; align-items: center; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .hint code { background: #f1f3f7; padding: 1px 5px; border-radius: 4px; }
+
+  .badge {
+    display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px;
+    font-weight: 600;
+  }
+  .badge.ok { background: var(--ok-bg); color: var(--ok); }
+  .badge.err { background: var(--err-bg); color: var(--err); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); }
+
+  .log { display: flex; flex-direction: column; gap: 10px; }
+  .log-item { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .log-head {
+    display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+    background: #f8f9fb; font-size: 12px; border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .log-head .method { font-weight: 700; color: var(--brand-dark); }
+  .log-head .path { font-family: ui-monospace, Consolas, monospace; }
+  .log-head .trace { margin-left: auto; color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+  pre {
+    margin: 0; padding: 10px 12px; background: var(--code-bg); color: var(--code-text);
+    font: 12px/1.55 ui-monospace, Consolas, monospace; overflow: auto; max-height: 320px;
+    white-space: pre-wrap; word-break: break-all;
+  }
+  .tip { background: #fff; border-left: 3px solid var(--brand); padding: 8px 12px; font-size: 12px; color: #374151; margin-top: 8px; border-radius: 0 6px 6px 0; }
+  .tip.warn { border-left-color: #d97706; background: var(--warn-bg); }
+  .tip.err { border-left-color: #dc2626; background: var(--err-bg); }
+  .empty { color: var(--muted); font-size: 13px; text-align: center; padding: 40px 0; }
+  .kv { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--muted); word-break: break-all; }
+  details summary { cursor: pointer; font-size: 12px; color: var(--muted); margin-top: 10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>VAPTCHA 接入联调</h1>
+    <p>零构建单页，走完「人机验证 → 发码 → 注册 → 登录 → 取当前用户」全链路。所有请求打到本地 FastAPI 服务。</p>
+  </header>
+
+  <div class="cols">
+    <!-- 左：操作区 -->
+    <div>
+      <div class="card" id="card-config">
+        <h2><span class="step-no">⚙</span>连接配置</h2>
+        <div class="row">
+          <div>
+            <label>API Base（含版本前缀）</label>
+            <input id="apiBase" value="http://127.0.0.1:8000/api/v1" />
+          </div>
+          <div>
+            <label>VID（前端公开，VKey 不在这里）</label>
+            <input id="vid" value="id_58938b9b28d4677" />
+          </div>
+        </div>
+        <div class="hint">
+          当前页面 Origin：<code id="origin"></code> —— 需把 <code id="domainHint"></code> 加进 VAPTCHA 控制台该验证单元的<b>域名白名单</b>，否则验证窗口会报域名未授权。
+        </div>
+        <div class="hint" id="ctxState"></div>
+      </div>
+
+      <div class="card" id="card-captcha">
+        <h2><span class="step-no">1</span>人机验证</h2>
+        <div id="vaptcha-container"></div>
+        <button id="btnCaptcha" class="ghost">开始人机验证</button>
+        <div class="hint" id="captchaState">未验证。SDK 只提供能力，验证入口由页面自己给。</div>
+        <div id="captchaPayload" class="kv"></div>
+      </div>
+
+      <div class="card" id="card-code">
+        <h2><span class="step-no">2</span>发送邮箱验证码</h2>
+        <label>邮箱</label>
+        <input id="email" type="email" placeholder="you@qq.com" />
+        <button id="btnSendCode" disabled>发送验证码</button>
+        <div class="hint" id="ticketState">
+          <span class="badge warn">等第 1 步</span> 票据一次性：必须先通过人机验证，按钮才会亮；用掉一次就要重新验证。
+        </div>
+      </div>
+
+      <div class="card" id="card-register">
+        <h2><span class="step-no">3</span>注册</h2>
+        <div class="row">
+          <div>
+            <label>6 位验证码</label>
+            <input id="code" inputmode="numeric" maxlength="6" placeholder="123456" />
+          </div>
+          <div>
+            <label>密码（8–128，不限字符类型）</label>
+            <input id="password" type="password" placeholder="至少 8 位" />
+          </div>
+        </div>
+        <label>昵称（可留空，默认取邮箱 @ 前缀）</label>
+        <input id="nickname" placeholder="可选" />
+        <button id="btnRegister">注册并登录</button>
+      </div>
+
+      <div class="card" id="card-login">
+        <h2><span class="step-no">4</span>登录 / 取当前用户</h2>
+        <div class="hint" id="tokenState">尚未持有 access_token。</div>
+        <button id="btnLogin" class="ghost">用上面的邮箱密码登录</button>
+        <button id="btnMe" class="ghost">GET /auth/me</button>
+      </div>
+    </div>
+
+    <!-- 右：请求日志 -->
+    <div>
+      <div class="card">
+        <h2>请求日志</h2>
+        <div class="log" id="log"><div class="empty">还没有请求。左侧走一遍流程，这里会显示每个请求的状态码、业务 code、trace_id 和原始响应。</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://c4.vaptcha.com/src/v4.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const API_KEY = "sr.demo.apiBase";
+  const VID_KEY = "sr.demo.vid";
+
+  $("origin").textContent = location.origin;
+  $("domainHint").textContent = location.hostname;
+
+  // VAPTCHA 要求页面走 HTTPS；而 HTTPS 页面再去 fetch http://127.0.0.1:8000
+  // 会被当成混合内容拦掉。所以 HTTPS 下统一走同源 /api/v1（由 .tmp-tls 的反代转发），
+  // http 下才直连后端端口。
+  const SAME_ORIGIN = location.protocol === "https:";
+  $("apiBase").value = SAME_ORIGIN
+    ? location.origin + "/api/v1"
+    : localStorage.getItem(API_KEY) || $("apiBase").value;
+  $("vid").value = localStorage.getItem(VID_KEY) || $("vid").value;
+
+  // 自签证书下点"继续前往"进来，page 能跑但**不是安全上下文**：
+  // crypto.subtle 为 undefined，而验证窗口里的 pow.js 靠它算工作量证明，
+  // 于是窗口弹出来是白的。这条诊断把"能跑"和"能验证"的区别摊开。
+  (function showContext() {
+    const el = $("ctxState");
+    const subtle = typeof crypto !== "undefined" && crypto.subtle ? "可用" : "缺失";
+    const secure = window.isSecureContext ? "是" : "否";
+    if (window.isSecureContext && subtle === "可用") {
+      el.innerHTML =
+        '<span class="badge ok">安全上下文正常</span> isSecureContext=' + secure + "，crypto.subtle " + subtle;
+    } else {
+      el.innerHTML =
+        '<span class="badge err">不是安全上下文</span> crypto.subtle ' + subtle +
+        " —— 验证窗口会是白屏。自签证书需要先导入信任，见 docs/07-api-examples.md";
+    }
+  })();
+
+  let vaptchaObj = null;
+  let captcha = { token: "", knock: "", dfu: "", ip: "" };
+  let accessToken = "";
+
+  // ---- 错误码 → 人话。与 docs/04-api-contract.md 保持同步 ----
+  const CODE_HINT = {
+    11400: "验证码/人机验证不通过。看 message 区分：带「人机验证」字样就是票据问题，要重新走第 1 步。",
+    11401: "未登录或登录已失效（登录接口也可能是邮箱密码不对）。",
+    11403: "账号被停用。",
+    11409: "该邮箱已被注册，直接走第 4 步登录。",
+    11429: "太频繁：发码有 60 秒冷却 / 每日上限，登录有失败次数限制。",
+    21502: "SMTP 发信失败，看服务端日志的上游报错。",
+    21503: "鉴权未配置（缺 JWT_SECRET / SMTP / Redis）。",
+    21504: "验签上游不可达/超时 → fail-closed 拒绝发码。查终端能否直连 v41.vaptcha.com，以及代理设置。",
+  };
+
+  function log(entry) {
+    const logEl = $("log");
+    const empty = logEl.querySelector(".empty");
+    if (empty) empty.remove();
+
+    const item = document.createElement("div");
+    item.className = "log-item";
+
+    const ok = entry.status >= 200 && entry.status < 300;
+    const head = document.createElement("div");
+    head.className = "log-head";
+    head.innerHTML =
+      '<span class="method">' + entry.method + "</span>" +
+      '<span class="path"></span>' +
+      '<span class="badge ' + (ok ? "ok" : "err") + '">HTTP ' + entry.status + "</span>" +
+      '<span class="badge ' + (entry.code === 0 ? "ok" : "err") + '">code ' + entry.code + "</span>" +
+      '<span class="trace">' + (entry.traceId || "") + "</span>";
+    head.querySelector(".path").textContent = entry.path;
+
+    const pre = document.createElement("pre");
+    pre.textContent = JSON.stringify(entry.body, null, 2);
+
+    item.appendChild(head);
+    item.appendChild(pre);
+
+    if (entry.code !== 0 && CODE_HINT[entry.code]) {
+      const tip = document.createElement("div");
+      tip.className = "tip err";
+      tip.textContent = "code " + entry.code + "：" + CODE_HINT[entry.code];
+      tip.style.margin = "0";
+      tip.style.borderRadius = "0";
+      item.appendChild(tip);
+    }
+    logEl.prepend(item);
+  }
+
+  async function call(method, path, { body, auth } = {}) {
+    const base = $("apiBase").value.replace(/\/+$/, "");
+    if (!SAME_ORIGIN) localStorage.setItem(API_KEY, $("apiBase").value);
+    const headers = { "Content-Type": "application/json" };
+    if (auth) headers.Authorization = "Bearer " + auth;
+
+    let status = 0, json = { note: "请求未发出（网络/CORS 失败）" }, traceId = "";
+    try {
+      const res = await fetch(base + path, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      status = res.status;
+      traceId = res.headers.get("X-Request-ID") || "";
+      const text = await res.text();
+      try { json = text ? JSON.parse(text) : {}; } catch (_) { json = { raw: text }; }
+    } catch (err) {
+      json = { note: "fetch 抛错，通常是后端没起、端口不对，或 CORS 没放行 " + location.origin + "。" , error: String(err) };
+    }
+
+    log({ method, path, status, code: json.code === undefined ? -1 : json.code, body: json, traceId: traceId || json.trace_id });
+    return { status, json };
+  }
+
+  // ---- 1. 人机验证 ----
+  function markCaptcha(okText, cls) {
+    const el = $("captchaState");
+    el.className = "hint";
+    el.innerHTML = '<span class="badge ' + cls + '">' + okText + "</span>";
+  }
+
+  // ---- Edge 兼容：把验证窗口改成内嵌 iframe，不再 window.open 开独立窗口 ----
+  // SDK 默认在 PC 上用弹出窗口，父页面通过 postMessage 把初始化数据递给它。
+  // Edge 里那个窗口拿不到数据，会一直停在「验证准备中…」（独立打开 verify.html
+  // 也是同样现象）；同一个 SDK 的内嵌分支在 Chrome / Edge 都正常。
+  // 这里把分支固定为内嵌；SDK 升级若改了内部方法名，feature-detect 会直接跳过。
+  function forceInlineVerify() {
+    try {
+      const proto = window.VaptchaCore && window.VaptchaCore.prototype;
+      if (!proto || typeof proto.shouldUseIframe !== "function") return false;
+      if (proto.__inlineForced) return true;
+      proto.shouldUseIframe = function () { return true; };
+      proto.__inlineForced = true;
+      return true;
+    } catch (err) {
+      console.warn("[vaptcha] 强制内嵌失败，回退 SDK 默认：", err);
+      return false;
+    }
+  }
+
+  // 内嵌面片由 SDK 自己挂到 body 的全屏遮罩层里（#vaptcha_iframe_overlay），
+  // 不占页面布局，所以容器不需要额外改高度。
+
+  async function initVaptcha() {
+    if (typeof window.vaptcha !== "function") {
+      markCaptcha("SDK 未加载", "err");
+      $("captchaState").innerHTML =
+        '<span class="badge err">SDK 未加载</span> 无法访问 <code>https://c4.vaptcha.com/src/v4.js</code>：检查网络或代理。';
+      return;
+    }
+    try {
+      vaptchaObj = await window.vaptcha({
+        vid: $("vid").value.trim(),
+        container: "#vaptcha-container",
+        lang: "zh-CN",
+      });
+      localStorage.setItem(VID_KEY, $("vid").value.trim());
+      const inline = forceInlineVerify();
+      markCaptcha("SDK 就绪", "ok");
+      $("captchaState").innerHTML +=
+        ' <span class="hint">' +
+        (inline
+          ? "点「开始人机验证」，验证面片会直接展开在下方（不弹新窗口）。"
+          : "点「开始人机验证」会弹出验证窗口。") +
+        "</span>";
+    } catch (err) {
+      markCaptcha("初始化失败", "err");
+      const msg = String(err);
+      $("captchaState").innerHTML +=
+        msg.indexOf("未授权") >= 0
+          ? ' <span class="hint">SDK 已加载、VID 有效，只是当前域名 <b>' + location.hostname +
+            "</b> 不在验证单元白名单里 —— 去 VAPTCHA 控制台「验证单元 → 域名」把它加上（本地再加 localhost）。</span>"
+          : ' <span class="hint">常见原因：VID 填错、当前域名不在白名单（' + location.hostname + "）。</span>";
+      console.error(err);
+    }
+  }
+
+  $("btnCaptcha").addEventListener("click", async () => {
+    if (!vaptchaObj) { await initVaptcha(); }
+    if (!vaptchaObj) return;
+    $("btnCaptcha").disabled = true;
+    try {
+      forceInlineVerify(); // 保险：core.js 若在 init 之后才加载，这里再补一次
+      const result = await vaptchaObj.validate();
+      // 官方文档：validate() 通过后读 token/knock/dfu/ip，四个一起提交
+      if (!result || !result.token || !result.knock) {
+        markCaptcha("未通过", "warn");
+        $("captchaState").innerHTML += ' <span class="hint">用户取消或验证未通过，可再次点击重试。</span>';
+        return;
+      }
+      captcha = {
+        token: result.token || "",
+        knock: result.knock || "",
+        dfu: result.dfu || "",
+        ip: result.ip || "",
+      };
+      markCaptcha("验证通过", "ok");
+      $("captchaPayload").textContent =
+        "token=" + captcha.token.slice(0, 28) + "…  knock=" + captcha.knock +
+        "  ip=" + (captcha.ip || "(空)") + "  dfu=" + (captcha.dfu ? captcha.dfu.length + " 字节" : "(空)");
+      $("card-captcha").classList.add("done");
+      setTicket("ready");
+    } finally {
+      $("btnCaptcha").disabled = false;
+    }
+  });
+
+  // 票据状态直接决定发码按钮能不能点：没票就点，服务器只会回 400/11400，
+  // 那是用户在替页面的状态管理背锅，不如一开始就点不动。
+  function setTicket(state) {
+    const el = $("ticketState");
+    const btn = $("btnSendCode");
+    if (state === "ready") {
+      el.innerHTML = '<span class="badge ok">票据就绪</span> 现在可以发码；这张票用过一次即失效。';
+      btn.disabled = false;
+    } else if (state === "sent") {
+      el.innerHTML = '<span class="badge warn">票据已用掉</span> 再发一次需要重新走第 1 步人机验证。';
+      btn.disabled = true;
+    } else {
+      el.innerHTML = '<span class="badge warn">等第 1 步</span> 票据一次性：必须先通过人机验证，按钮才会亮。';
+      btn.disabled = true;
+    }
+  }
+
+  // ---- 2. 发码 ----
+  $("btnSendCode").addEventListener("click", async () => {
+    const email = $("email").value.trim();
+    if (!email) { $("email").focus(); return; }
+    if (!captcha.token || !captcha.knock) {
+      setTicket("empty");
+      log({
+        method: "POST",
+        path: "/auth/verification-code",
+        status: 0,
+        code: -1,
+        body: { note: "本地拦截：还没有人机验证票据，请求未发出。先去第 1 步通过验证。" },
+        traceId: "",
+      });
+      return;
+    }
+    $("btnSendCode").disabled = true;
+    try {
+      const { status, json } = await call("POST", "/auth/verification-code", {
+        body: { email, scene: "register", ...captcha },
+      });
+      if (status === 200) {
+        $("card-code").classList.add("done");
+        $("code").focus();
+      }
+    } finally {
+      // 票据一次性：无论成功失败都清掉，避免拿旧票重试
+      captcha = { token: "", knock: "", dfu: "", ip: "" };
+      $("captchaPayload").textContent = "";
+      markCaptcha("票据已提交", "ok");
+      setTicket("sent");
+    }
+  });
+
+  // ---- 3. 注册 ----
+  $("btnRegister").addEventListener("click", async () => {
+    const body = {
+      email: $("email").value.trim(),
+      password: $("password").value,
+      code: $("code").value.trim(),
+      nickname: $("nickname").value.trim(),
+    };
+    const { status, json } = await call("POST", "/auth/register", { body });
+    if (status === 200 || status === 201) {
+      accessToken = json.data.token.access_token;
+      $("tokenState").innerHTML = '<span class="badge ok">已登录</span> user.id=' + json.data.user.id;
+      $("card-register").classList.add("done");
+    }
+  });
+
+  // ---- 4. 登录 / me ----
+  $("btnLogin").addEventListener("click", async () => {
+    const { status, json } = await call("POST", "/auth/login", {
+      body: { email: $("email").value.trim(), password: $("password").value },
+    });
+    if (status === 200) {
+      accessToken = json.data.token.access_token;
+      $("tokenState").innerHTML = '<span class="badge ok">已登录</span> user.id=' + json.data.user.id;
+    }
+  });
+
+  $("btnMe").addEventListener("click", async () => {
+    if (!accessToken) {
+      $("tokenState").innerHTML = '<span class="badge warn">没有令牌</span> 先注册或登录。';
+      return;
+    }
+    await call("GET", "/auth/me", { auth: accessToken });
+  });
+
+  initVaptcha();
+})();
+</script>
+</body>
+</html>

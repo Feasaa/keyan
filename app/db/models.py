@@ -23,7 +23,13 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, utcnow
-from app.db.enums import ConversationStatus, MessageRole, MessageStatus, UserStatus
+from app.db.enums import (
+    ConversationStatus,
+    MessageFeedback,
+    MessageRole,
+    MessageStatus,
+    UserStatus,
+)
 from app.db.types import (
     BinaryIP,
     IntEnumValue,
@@ -172,6 +178,9 @@ class Message(Base):
         Index("idx_msg_status_updated", "status", "updated_at"),
         CheckConstraint("role IN ('user', 'assistant', 'system', 'tool')", name="ck_msg_role"),
         CheckConstraint("status IN (0, 1, 2, 3)", name="ck_msg_status"),
+        CheckConstraint("feedback IN (0, 1, 2)", name="ck_msg_feedback"),
+        # 差评巡检：WHERE feedback=2 ORDER BY feedback_at DESC 是运营侧最常用的查询
+        Index("idx_msg_feedback", "feedback", "feedback_at"),
         {"comment": "消息"},
     )
 
@@ -210,6 +219,21 @@ class Message(Base):
     finish_reason: Mapped[str | None] = mapped_column(String(32), default=None)
     # 上游报错原文可能带密钥或内部地址，落库前必须脱敏
     error_message: Mapped[str | None] = mapped_column(String(512), default=None)
+    # 评价放在消息行上而不是独立表：一条消息只有一个评价，列表页要回显"赞过没"
+    # 就必须回查，独立表意味着每页多一次 JOIN 或一次 IN 查询。
+    # 代价是没有评价历史（改主意就覆盖），需要审计时再加 event 表。
+    feedback: Mapped[MessageFeedback] = mapped_column(
+        IntEnumValue(MessageFeedback),
+        default=MessageFeedback.NONE,
+        server_default=text("0"),
+        comment="用户评价：0 未评价 / 1 赞 / 2 踩",
+    )
+    feedback_reason: Mapped[str | None] = mapped_column(
+        String(255), default=None, comment="点踩原因，可选"
+    )
+    feedback_at: Mapped[datetime | None] = mapped_column(
+        Timestamp, default=None, comment="评价时间，取消评价时清空"
+    )
     client_message_id: Mapped[str | None] = mapped_column(
         String(64), default=None, comment="客户端幂等键"
     )

@@ -31,10 +31,15 @@ USAGE = {"input_tokens": 11, "output_tokens": 22, "total_tokens": 33}
 
 
 class StubChain:
-    """逐字产出的桩链，事件结构与 LangChain 的 astream_events 一致。"""
+    """逐字产出的桩链，事件结构与 LangChain 的 astream_events 一致。
 
-    def __init__(self, answer: str = "这是桩回答") -> None:
+    `delay` 是每块之间的间隔。断线续传的用例需要"生成还在跑"的窗口 ——
+    瞬间吐完的桩里根本插不进断线这个动作，测出来的东西也就没有意义。
+    """
+
+    def __init__(self, answer: str = "这是桩回答", delay: float = 0.0) -> None:
         self.answer = answer
+        self.delay = delay
         self.calls: list[dict[str, Any]] = []
 
     async def ainvoke(self, inputs: dict[str, Any]) -> AIMessage:
@@ -46,6 +51,8 @@ class StubChain:
     ) -> AsyncIterator[dict[str, Any]]:
         self.calls.append(inputs)
         for piece in self.answer:
+            if self.delay:
+                await asyncio.sleep(self.delay)
             yield {
                 "event": "on_chat_model_stream",
                 "name": "ChatOpenAI",
@@ -95,10 +102,12 @@ def client() -> TestClient:
 
 @pytest.fixture()
 def stub_llm() -> Callable[..., StubChain]:
-    """安装成功的桩：stub_llm(answer=..., configured=...) → StubChain。"""
+    """安装成功的桩：stub_llm(answer=..., configured=..., delay=...) → StubChain。"""
 
-    def install(answer: str = "这是桩回答", configured: bool = True) -> StubChain:
-        chain = StubChain(answer)
+    def install(
+        answer: str = "这是桩回答", configured: bool = True, delay: float = 0.0
+    ) -> StubChain:
+        chain = StubChain(answer, delay)
         service = _make_service(chain if configured else None, configured)
         app.dependency_overrides[get_llm_service] = lambda: service
         return chain
@@ -181,6 +190,11 @@ def _test_settings() -> Settings:
             # 不放大就会"单跑能过、整套跑 429"。按账号的阈值保持 5，
             # 那才是 test_auth.py 里要断言的东西。
             "LOGIN_MAX_ATTEMPTS_PER_IP": 1000,
+            # 测试环境固定关闭人机验证：开发机 .env 里可能配了 VAPTCHA_VID/VKey，
+            # 不清掉的话所有发码用例都会撞 11400。
+            # 人机验证自身的行为契约只在 test_vaptcha.py 里测，那里自建配置。
+            "VAPTCHA_VID": "",
+            "VAPTCHA_VKEY": "",
         }
     )
 
@@ -214,20 +228,40 @@ def test_redis_url() -> str:
 
 
 async def _purge_test_users() -> None:
-    """删除测试用户。
+    """删除测试用户及其对话数据。
 
     auth_sessions 对 users 是 ON DELETE CASCADE，删用户会级联清掉会话，
     不用手动删两张表。
+
+    **但对话数据不是**：`conversations.user_id` 和 `messages.conversation_id`
+    都是 `ON DELETE RESTRICT`（对话内容是排查问题的证据，不能被级联误删）。
+    所以先按邮箱前缀删消息、再删会话，最后才轮到用户 —— 顺序反了会直接
+    撞上外键约束，而清理失败一旦被静默吞掉，测试用户就会一直堆在库里。
     """
     settings = get_settings()
     engine = create_async_engine(settings.database_url)
+    params = {"pattern": f"{TEST_EMAIL_PREFIX}%@example.com"}
     try:
         async with engine.begin() as conn:
+            # LIKE 的模式串作为**绑定参数**传入，不是拼进 SQL 文本 ——
+            # 值里的 % 是字面量，不会被当成通配符以外的东西。
             await conn.execute(
-                # LIKE 的模式串作为**绑定参数**传入，不是拼进 SQL 文本 ——
-                # 值里的 % 是字面量，不会被当成通配符以外的东西。
+                text(
+                    "DELETE m FROM messages m JOIN users u ON m.user_id = u.id "
+                    "WHERE u.email LIKE :pattern"
+                ),
+                params,
+            )
+            await conn.execute(
+                text(
+                    "DELETE c FROM conversations c JOIN users u ON c.user_id = u.id "
+                    "WHERE u.email LIKE :pattern"
+                ),
+                params,
+            )
+            await conn.execute(
                 text("DELETE FROM users WHERE email LIKE :pattern"),
-                {"pattern": f"{TEST_EMAIL_PREFIX}%@example.com"},
+                params,
             )
     finally:
         await engine.dispose()
@@ -307,3 +341,31 @@ def auth_client(
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+
+
+# 注册接口要求密码有强度，测试统一用这一串
+TEST_PASSWORD = "correct horse battery staple"
+CODE_PATH = "/api/v1/auth/verification-code"
+REGISTER_PATH = "/api/v1/auth/register"
+
+
+@pytest.fixture()
+def auth_headers(
+    auth_client: TestClient,
+    stub_mail: StubMailService,
+    make_email: Callable[[], str],
+) -> dict[str, str]:
+    """注册一个临时用户并返回 Authorization 头。
+
+    对话接口要求登录，所以凡是走 `/chat`、`/chat/stream` 的用例都得先有身份。
+    注册的用户走 `sr-test-` 前缀，会话级 purge 会连同对话数据一起清掉。
+    """
+    email = make_email()
+    assert auth_client.post(CODE_PATH, json={"email": email}).status_code == 200
+    response = auth_client.post(
+        REGISTER_PATH,
+        json={"email": email, "password": TEST_PASSWORD, "code": stub_mail.last_code},
+    )
+    assert response.status_code == 201, response.text
+    token = response.json()["data"]["token"]["access_token"]
+    return {"Authorization": f"Bearer {token}"}

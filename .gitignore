@@ -31,3 +31,9 @@ htmlcov/
 *.sqlite3
 *.log
 logs/
+
+# ---- 本地自签证书 ----
+# .tmp-tls/serve_https.py 是联调工具（文档引用它），要进仓库；
+# 但同目录的私钥永远不能提交，证书本身也是本机产物
+.tmp-tls/*.pem
+.tmp-tls/*.cer

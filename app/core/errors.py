@@ -52,17 +52,25 @@ class ErrorCode(Enum):
     # X=2 是服务端依赖的问题（邮件发不出去、功能没配）。
     # 两类分开，前端才知道该让用户改输入、还是提示"稍后重试"。
     AUTH_CODE_INVALID = ErrorSpec(11400, 400, "验证码不正确或已过期")
+    # 11400 是鉴权模块 400 的唯一编码，邮箱验证码与人机验证票据共用：
+    # 客户端动作一样（重新获取 / 重新验证），区分只会给绕过尝试免费指导。
     UNAUTHORIZED = ErrorSpec(11401, 401, "未登录或登录已失效")
     FORBIDDEN = ErrorSpec(11403, 403, "没有权限执行该操作")
     AUTH_EMAIL_TAKEN = ErrorSpec(11409, 409, "该邮箱已被注册")
     AUTH_RATE_LIMITED = ErrorSpec(11429, 429, "操作过于频繁，请稍后再试")
     AUTH_MAIL_SEND_FAILED = ErrorSpec(21502, 502, "验证码邮件发送失败")
+    # 与 22504（LLM 上游响应超时）同构：验签上游超时 / 不可达，fail-closed
+    CAPTCHA_UPSTREAM_ERROR = ErrorSpec(21504, 504, "人机验证服务异常")
     AUTH_NOT_CONFIGURED = ErrorSpec(21503, 503, "鉴权功能未配置")
 
     # ---- 对话（2 2 xxx）----
     LLM_UPSTREAM_ERROR = ErrorSpec(22502, 502, "LLM 上游服务异常")
     LLM_NOT_CONFIGURED = ErrorSpec(22503, 503, "LLM 未配置")
     LLM_TIMEOUT = ErrorSpec(22504, 504, "LLM 上游响应超时")
+    # 流式生成期间长时间没有任何客户端接收，服务端主动停掉（省 token）
+    CHAT_STREAM_ABANDONED = ErrorSpec(22408, 408, "长时间没有客户端接收，生成已中止")
+    # 分片缓冲已过期（TTL 到了 / 进程重启）：续传失败，客户端应改拉消息全文
+    CHAT_STREAM_EXPIRED = ErrorSpec(22410, 410, "流式响应已过期，请重新读取消息")
 
     @property
     def code(self) -> int:

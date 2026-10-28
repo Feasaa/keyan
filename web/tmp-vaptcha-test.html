@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VAPTCHA 临时测试</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px; background: #f6f7f9; color: #1d2129;
+         font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  .box { max-width: 720px; margin: 0 auto; background: #fff; border: 1px solid #e4e7ee;
+         border-radius: 10px; padding: 20px 22px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p.sub { margin: 0 0 16px; color: #6b7280; font-size: 13px; }
+  label { display: block; font-size: 12px; color: #6b7280; margin: 12px 0 4px; }
+  input { width: 100%; padding: 8px 10px; border: 1px solid #e4e7ee; border-radius: 7px; font: inherit; }
+  input:focus { outline: 2px solid #bfdbfe; border-color: #2563eb; }
+  button { margin: 12px 8px 0 0; padding: 8px 16px; border: 0; border-radius: 7px;
+           background: #2563eb; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  button.ghost { background: #eef2ff; color: #1d4ed8; }
+  button:disabled { background: #9ca3af; cursor: not-allowed; }
+  #box-vaptcha { min-height: 48px; margin-top: 10px; }
+  .state { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px;
+           border-radius: 999px; background: #eef0f4; color: #4b5563; }
+  .state.ok { background: #eaf7ee; color: #15803d; }
+  .state.err { background: #fdecec; color: #b91c1c; }
+  pre { background: #0f172a; color: #d7e2f1; padding: 12px; border-radius: 8px; overflow: auto;
+        font: 12px/1.55 ui-monospace, Consolas, monospace; white-space: pre-wrap; word-break: break-all; }
+  .tip { font-size: 12px; color: #6b7280; margin-top: 8px; }
+  hr { border: 0; border-top: 1px solid #eef0f4; margin: 18px 0; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h1>VAPTCHA 临时测试页</h1>
+  <p class="sub">只做两件事：确认 SDK 能加载、确认 <code>validate()</code> 能拿到 token/knock/dfu/ip。后端起着就能顺手发一条验证码请求。</p>
+
+  <label>VID（前端公开值，VKey 不在前端）</label>
+  <input id="vid" value="id_58938b9b28d4677" />
+
+  <label>后端 API Base</label>
+  <input id="api" value="http://127.0.0.1:8000/api/v1" />
+
+  <label>用于测试的邮箱（可选，发码时才用）</label>
+  <input id="email" type="email" placeholder="you@qq.com" />
+
+  <hr />
+
+  <div>SDK 状态：<span id="sdkState" class="state">加载中…</span></div>
+  <div id="box-vaptcha"></div>
+  <button id="btnValidate">开始人机验证</button>
+  <button id="btnSend" class="ghost">带票据发验证码</button>
+  <p class="tip">页面 Origin：<b id="origin"></b> —— 该域名需在 VAPTCHA 控制台的验证单元白名单里，否则验证窗口会报域名未授权。</p>
+
+  <hr />
+  <div>结果</div>
+  <pre id="out">（点击上方按钮）</pre>
+</div>
+
+<script src="https://c4.vaptcha.com/src/v4.js"></script>
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var obj = null, payload = null;
+
+  $("origin").textContent = location.origin;
+
+  // VAPTCHA 强制页面走 HTTPS；HTTPS 页面再 fetch http://127.0.0.1:8000 属于混合内容，
+  // 会被浏览器拦掉。所以 HTTPS 下默认走同源 /api/v1（.tmp-tls 的反代负责转发），
+  // 只有 http 页面才直连后端端口。
+  if (location.protocol === "https:") {
+    $("api").value = location.origin + "/api/v1";
+  }
+
+  function setState(el, text, cls) {
+    el.textContent = text;
+    el.className = "state" + (cls ? " " + cls : "");
+  }
+  function show(v) {
+    $("out").textContent = typeof v === "string" ? v : JSON.stringify(v, null, 2);
+  }
+
+  // 1) SDK 是否加载
+  if (typeof window.vaptcha !== "function") {
+    setState($("sdkState"), "加载失败（c4.vaptcha.com 不可达？）", "err");
+    show("v4.js 没有加载成功。检查网络/代理能否访问 https://c4.vaptcha.com/src/v4.js");
+    return;
+  }
+  setState($("sdkState"), "已加载", "ok");
+
+  // 1.5) Edge 兼容：强制内嵌验证，不弹独立窗口
+  // 默认在 PC 上 SDK 会 window.open 一个验证窗口，靠 postMessage 拿父页面的初始化数据；
+  // Edge 里那个窗口拿不到，会一直停在「验证准备中…」。内嵌分支在 Chrome / Edge 都正常。
+  // SDK 升级若改了内部方法名，下面的 feature-detect 会直接跳过，退回默认行为。
+  var inlineForced = false;
+  function forceInlineVerify() {
+    try {
+      var proto = window.VaptchaCore && window.VaptchaCore.prototype;
+      if (!proto || typeof proto.shouldUseIframe !== "function") return inlineForced;
+      if (!proto.__inlineForced) {
+        proto.shouldUseIframe = function () { return true; };
+        proto.__inlineForced = true;
+      }
+      inlineForced = true;
+    } catch (err) {
+      console.warn("强制内嵌失败，回退 SDK 默认：", err);
+    }
+    return inlineForced;
+  }
+
+  // 2) 初始化
+  window.vaptcha({
+    vid: $("vid").value.trim(),
+    container: "#box-vaptcha",
+    lang: "zh-CN"
+  }).then(function (instance) {
+    obj = instance;
+    forceInlineVerify();
+    setState($("sdkState"), "已初始化", "ok");
+  }).catch(function (err) {
+    var msg = String(err);
+    setState($("sdkState"), "初始化失败", "err");
+    if (msg.indexOf("未授权") >= 0) {
+      // SDK 加载成功、VID 也被认出来了，只是这个域名没被验证单元允许 ——
+      // 报错原文只有「当前网站未授权」，不说该加什么，所以这里直接把动作写出来
+      show("当前域名未授权（SDK 已加载、VID 有效，纯粹是白名单问题）\n\n"
+        + "要加进白名单的域名：\n  " + location.hostname + "\n\n"
+        + "VAPTCHA 控制台 → 验证单元 → 域名，把 " + location.hostname
+        + " 加进去（本地调试通常再加一个 localhost），保存后刷新本页。\n\n"
+        + "原始报错：" + msg);
+    } else {
+      show("初始化失败，常见原因：VID 填错，或当前域名不在白名单。\n" + msg);
+    }
+  });
+
+  // 3) 验证
+  $("btnValidate").addEventListener("click", function () {
+    if (!obj) { show("实例还没初始化好，稍等一下再点。"); return; }
+    $("btnValidate").disabled = true;
+    forceInlineVerify();
+    show("等待用户在验证窗口中操作…");
+    obj.validate().then(function (r) {
+      if (!r || !r.token || !r.knock) {
+        show({ note: "未通过或用户取消", raw: r || null });
+        return;
+      }
+      payload = { token: r.token, knock: r.knock, dfu: r.dfu || "", ip: r.ip || "" };
+      show({
+        note: "验证通过 —— 这四件套原样提交给后端即可，字段名与 SDK 一致",
+        token: payload.token,
+        knock: payload.knock,
+        dfu_len: payload.dfu.length,
+        ip: payload.ip
+      });
+    }).catch(function (e) {
+      show("validate() 抛错：" + String(e));
+    }).then(function () {
+      $("btnValidate").disabled = false;
+    });
+  });
+
+  // 4) 带票据发码（后端在跑才有意义）
+  $("btnSend").addEventListener("click", function () {
+    var email = $("email").value.trim();
+    if (!email) { show("先填一个邮箱。"); return; }
+    if (!payload) { show("还没有票据：先点「开始人机验证」并通过。\n（后端开启人机验证后，没票据会返回 400 / 11400）"); return; }
+
+    var base = $("api").value.replace(/\/+$/, "");
+    show("POST " + base + "/auth/verification-code …");
+    fetch(base + "/auth/verification-code", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: email, scene: "register", token: payload.token, knock: payload.knock, dfu: payload.dfu, ip: payload.ip })
+    }).then(function (res) {
+      return res.text().then(function (t) {
+        var body;
+        try { body = JSON.parse(t); } catch (e) { body = { raw: t }; }
+        show({ http_status: res.status, trace_id: res.headers.get("X-Request-ID"), body: body });
+      });
+    }).catch(function (e) {
+      show("请求发不出去：后端没起（8000 端口）、地址不对，或 CORS 没放行 " + location.origin + "。\n" + String(e));
+    });
+  });
+})();
+</script>
+</body>
+</html>

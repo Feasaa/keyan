@@ -1,89 +1,235 @@
-"""对话端点：一次性响应、SSE 流式响应、配置状态查询。
+"""对话端点：一次性响应、SSE 流式响应（可断线续传）、配置状态查询。
 
-分层：路由只做参数校验、协议适配与响应组装，链路细节全在 LLMService。
+分层：路由只做参数校验、协议适配与响应组装；链路细节在 LLMService，
+会话归属与落库在 ConversationService，流式缓冲与生产者任务在 StreamHub。
 
-错误处理现在**全部交给全局处理器**（app/core/exception_handlers.py）：
-路由里不再出现 HTTPException，业务异常直接往上抛，
-由 AppError 自带的错误码决定状态码与文案。
+**对话必须登录。** 没有令牌一律 401，不存在"匿名试用"分支：
 
-SSE 仍有两种错误通道，这一点没变：
+    历史上下文只能来自服务端。让客户端传 `history` 等于把喂给模型的
+    上下文交给浏览器决定 —— 伪造几条 assistant 消息就能把模型带偏，
+    而这类注入在服务端日志里看不出来（请求参数是合法的）。
+    没有 user_id 也就没有归属，"匿名会话"只会变成一堆无法清理的孤儿数据。
+
+流式对话的两段式：
+    POST /chat/stream              开工：建会话 + 写消息占位 + 起生产者任务
+    GET  /chat/stream/{message_id}  续读：从 Last-Event-ID 之后接着拿帧
+
+为什么要拆成两个接口：断线重连时**绝不能重发 POST** —— 那会新建一轮、
+再扣一次 token，用户看到的还是从头开始的答案。GET 只读缓冲，天然幂等，
+重连十次也只花一次生成的钱。
+
+SSE 仍有两种错误通道：
     流开始前 → 抛 AppError，走全局处理器，客户端拿到真实状态码
     流开始后 → 响应头已发出，只能往流里写 event=error 帧
+
+落库时机：`event=done` **之前**。客户端看到 done 通常会立刻刷新会话列表，
+先发 done 再写库会出现"回答完了但列表里没有这条"。这条规则现在由生产者
+保证（它先写库、再追加 done 帧），与连接是否还在无关。
 """
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+import re
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
-from sse_starlette import EventSourceResponse, JSONServerSentEvent, ServerSentEvent
+from fastapi import APIRouter, Depends, Query, Request
+from sse_starlette import EventSourceResponse
 
-from app.core.config import Settings, get_settings
-from app.core.context import current_trace_id
-from app.core.response import ApiResponse, ok
-from app.core.sse import EVENT_DELTA, EVENT_DONE, EVENT_ERROR, EVENT_META, SSE_DONE
-from app.schemas.chat import (
-    ChatRequest,
-    ChatResponse,
-    ChatStatusResponse,
-    StreamChunk,
-    StreamError,
-    StreamMeta,
+from app.api.deps import (
+    CurrentUser,
+    get_conversation_service,
+    get_stream_buffer,
 )
-from app.services.exceptions import LLMUpstreamError, ServiceError
-from app.services.llm_service import (
-    LLMService,
-    StreamFinished,
-    TokenDelta,
-    get_llm_service,
+from app.core.config import Settings, get_settings
+from app.core.errors import InvalidParamError, NotFoundError
+from app.core.response import ApiResponse, ok
+from app.db.models import User
+from app.schemas.chat import ChatRequest, ChatResponse, ChatStatusResponse
+from app.services.conversation_service import ConversationService, TurnContext
+from app.services.exceptions import LLMUpstreamError, ServiceError, StreamExpiredError
+from app.services.llm_service import LLMService, get_llm_service
+from app.services.stream_hub import (
+    STREAM_START,
+    StreamBuffer,
+    TurnRegistry,
+    TurnRunner,
+    stream_frames,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Redis Stream 的 entry id 形如 `1761666000000-3`。
+# 只做形状校验：值本身是服务端分配的，客户端伪造一个不存在的 id 只会读到空，
+# 但形状不对（比如带换行）会让 XREAD 直接抛错变成 500。
+_STREAM_ID_PATTERN = re.compile(r"^\d{1,20}-\d{1,20}$")
+
 
 @router.post(
     "",
     response_model=ApiResponse[ChatResponse],
     summary="对话（一次性返回）",
-    description="等待模型生成完毕后一次性返回，适合短回答与服务端调用。",
+    description=(
+        "需要登录（Bearer access_token）。等待模型生成完毕后一次性返回。"
+        "返回的 conversation_id / message_id 用于继续对话和评价。"
+    ),
+    responses={
+        401: {"description": "未登录或令牌失效"},
+        503: {"description": "LLM 未配置"},
+    },
 )
 async def chat(
     payload: ChatRequest,
-    service: LLMService = Depends(get_llm_service),
+    user: CurrentUser,
+    service: Annotated[LLMService, Depends(get_llm_service)],
+    conversations: Annotated[ConversationService, Depends(get_conversation_service)],
 ) -> ApiResponse[ChatResponse]:
-    result = await service.achat(payload)
-    return ok(ChatResponse(answer=result.answer, model=result.model, usage=result.usage))
+    context = await _prepare(conversations, user, payload, service)
+    try:
+        result = await service.achat(payload, context.history)
+    except (LLMUpstreamError, ServiceError) as exc:
+        # 失败也要落一条 FAILED：否则会话里只剩用户那句话，
+        # 列表显示"共 2 条"却只查得到 1 条，统计和实际永远对不上
+        await conversations.fail_turn(context, reason=exc.message)
+        raise
+
+    usage = result.usage or {}
+    await conversations.complete_turn(
+        context,
+        answer=result.answer,
+        prompt_tokens=usage.get("prompt_tokens"),
+        completion_tokens=usage.get("completion_tokens"),
+    )
+    return ok(
+        ChatResponse(
+            answer=result.answer,
+            model=result.model,
+            usage=result.usage,
+            conversation_id=_sid(context.conversation_id),
+            message_id=_sid(context.assistant_message_id),
+        )
+    )
 
 
 @router.post(
     "/stream",
     summary="对话（SSE 流式）",
     description=(
-        "以 text/event-stream 逐块返回：event=delta 为增量文本，"
+        "需要登录（Bearer access_token）。以 text/event-stream 逐块返回："
+        "event=start 给出会话与消息 ID（续传要用的锚点），event=delta 为增量文本，"
         "event=meta 携带模型与用量，event=done 表示结束，event=error 携带错误码。"
-        "流式接口不套统一响应结构 —— 它本身是事件流，不是单个 JSON。"
+        "**断线后不要重发本接口**，改用 GET /chat/stream/{message_id} 续读。"
     ),
     response_class=EventSourceResponse,
     responses={
         200: {"content": {"text/event-stream": {}}, "description": "SSE 事件流"},
+        401: {"description": "未登录或令牌失效"},
+        404: {"description": "会话不存在或不属于当前用户"},
         422: {"description": "参数校验失败"},
-        503: {"description": "LLM 未配置"},
+        503: {"description": "LLM 未配置或 Redis 未配置"},
     },
 )
 async def chat_stream(
     request: Request,
     payload: ChatRequest,
-    service: LLMService = Depends(get_llm_service),
-    settings: Settings = Depends(get_settings),
+    user: CurrentUser,
+    service: Annotated[LLMService, Depends(get_llm_service)],
+    conversations: Annotated[ConversationService, Depends(get_conversation_service)],
+    buffer: Annotated[StreamBuffer, Depends(get_stream_buffer)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> EventSourceResponse:
     # 配置缺失属于请求前置条件，必须在响应头下发前拦掉。
     # 这里抛出的 AppError 会被全局处理器接住 —— 此时流还没开始。
     service.ensure_configured()
 
+    # 归属校验、上下文加载、消息占位全部前移到这里：
+    # 一旦开始往客户端写字节，这些错误就只能变成流里的 error 帧，
+    # 前端拿不到 404/401，只知道"聊到一半失败了"
+    context = await _prepare(conversations, user, payload, service)
+    turn_id = context.assistant_message_id
+    if turn_id is None:  # 仅类型收窄：prepare_turn 一定写了占位
+        raise RuntimeError("对话上下文缺少助手消息 ID")
+
+    # 先把心跳立起来再起任务：消费者可能抢在生产者之前读第一帧，
+    # 那时候如果没有 beat，会被判成"生产者已死"
+    await buffer.start(turn_id, settings.SSE_RESUME_GRACE_SECONDS)
+
+    runner = TurnRunner(
+        service=service,
+        conversations=conversations,
+        context=context,
+        payload=payload,
+        history=context.history,
+        buffer=buffer,
+        settings=settings,
+    )
+    _registry(request).add(turn_id, asyncio.create_task(runner.run(), name=f"chat-turn-{turn_id}"))
+
+    return _stream_response(request, buffer, context, settings, after=STREAM_START)
+
+
+@router.get(
+    "/stream/{message_id}",
+    summary="对话（断线续传）",
+    description=(
+        "需要登录。断线后用它接着读，**不要重发 POST /chat/stream**。"
+        "把上次收到的最后一个 `id:` 作为 `Last-Event-ID` 请求头回传"
+        "（或 `?last_event_id=`），服务端从它之后接着发，不重新生成、不重复计费。"
+        "不带该参数则从头重放。缓冲保留 10 分钟，过期返回 410。"
+    ),
+    response_class=EventSourceResponse,
+    responses={
+        200: {"content": {"text/event-stream": {}}, "description": "SSE 事件流"},
+        401: {"description": "未登录或令牌失效"},
+        404: {"description": "消息不存在或不属于当前用户"},
+        410: {"description": "流式缓冲已过期，请改拉消息全文"},
+        422: {"description": "续传位置格式不合法"},
+    },
+)
+async def resume_stream(
+    request: Request,
+    message_id: str,
+    user: CurrentUser,
+    conversations: Annotated[ConversationService, Depends(get_conversation_service)],
+    buffer: Annotated[StreamBuffer, Depends(get_stream_buffer)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    last_event_id: Annotated[str | None, Query(alias="last_event_id")] = None,
+) -> EventSourceResponse:
+    context = await conversations.resume_context(
+        user_id=user.id, message_id=_parse_message_id(message_id)
+    )
+    turn_id = context.assistant_message_id
+    if turn_id is None:  # 仅类型收窄
+        raise NotFoundError("消息不存在")
+
+    if not await buffer.exists(turn_id):
+        # 缓冲没了但消息还在库里：这不是 404（消息没丢），而是 410 ——
+        # 客户端应该改拉 GET /conversations/{id}/messages 拿全文。
+        # 都回 404 会让前端误以为消息被删了。
+        raise StreamExpiredError()
+
+    # 标准的 Last-Event-ID 请求头优先，其次是 query —— 后者是给
+    # 不方便设自定义头的客户端（或手动重放）用的
+    after = request.headers.get("last-event-id") or last_event_id or STREAM_START
+    if not _STREAM_ID_PATTERN.match(after):
+        raise InvalidParamError("Last-Event-ID 格式不合法")
+
+    # 先续客户端心跳，让还在跑的生产者知道"人回来了"，别把生成停掉
+    await buffer.touch_consumer(turn_id, settings.SSE_RESUME_GRACE_SECONDS)
+    return _stream_response(request, buffer, context, settings, after=after)
+
+
+def _stream_response(
+    request: Request,
+    buffer: StreamBuffer,
+    context: TurnContext,
+    settings: Settings,
+    *,
+    after: str,
+) -> EventSourceResponse:
     return EventSourceResponse(
-        _event_source(service, payload),
+        stream_frames(buffer=buffer, context=context, after=after, settings=settings),
         # ping 是 SSE 注释行，客户端忽略；用来防住代理的空闲超时
         ping=settings.SSE_PING_SECONDS,
         # 停机时通知在途流收尾，而不是被进程退出硬切断
@@ -91,53 +237,40 @@ async def chat_stream(
     )
 
 
-async def _event_source(
-    service: LLMService,
+def _registry(request: Request) -> TurnRegistry:
+    registry = getattr(request.app.state, "turn_registry", None)
+    if registry is None:  # pragma: no cover - lifespan 一定会建
+        registry = TurnRegistry()
+        request.app.state.turn_registry = registry
+    return registry
+
+
+async def _prepare(
+    conversations: ConversationService,
+    user: User,
     payload: ChatRequest,
-) -> AsyncIterator[ServerSentEvent]:
-    try:
-        async for item in service.astream_chat(payload):
-            if isinstance(item, TokenDelta):
-                # 用 JSONServerSentEvent：普通 ServerSentEvent 对 dict 走 str()，
-                # 会产出单引号的 Python repr，客户端 JSON.parse 直接失败
-                yield JSONServerSentEvent(
-                    data=StreamChunk(delta=item.text).model_dump(), event=EVENT_DELTA
-                )
-            else:
-                yield JSONServerSentEvent(data=_meta(item).model_dump(), event=EVENT_META)
-        yield ServerSentEvent(data=SSE_DONE, event=EVENT_DONE)
-    except asyncio.CancelledError:
-        # 客户端断开：静默结束，不再写任何帧。
-        # 但要留一条日志 —— 用户报"回答到一半没了"时，这是唯一能区分
-        # "他自己关的页面"和"服务端崩了"的证据。
-        logger.info("对话流被客户端中断 trace_id=%s", current_trace_id())
-        raise
-    except (LLMUpstreamError, ServiceError) as exc:
-        # 流已开始，状态码改不了了，只能用事件传递。
-        # code 用业务错误码而不是裸 HTTP 状态码，和 JSON 接口保持一致。
-        #
-        # 必须同时落服务端日志：前置错误有全局处理器记，流内错误如果只发帧，
-        # 就变成"客户端知道、服务端查无此事"—— 5xx 级的上游故障本该触发告警，
-        # 却因为走的是 200 的流而完全不可观测。
-        logger.error(
-            "对话流中断 code=%s trace_id=%s message=%s",
-            exc.error_code.code,
-            current_trace_id(),
-            exc.message,
-            exc_info=exc,
-        )
-        yield JSONServerSentEvent(
-            data=StreamError(code=exc.error_code.code, message=exc.message).model_dump(),
-            event=EVENT_ERROR,
-        )
-
-
-def _meta(finished: StreamFinished) -> StreamMeta:
-    return StreamMeta(
-        model=finished.model,
-        prompt_tokens=finished.prompt_tokens,
-        completion_tokens=finished.completion_tokens,
+    service: LLMService,
+) -> TurnContext:
+    prompt = service.prompt
+    return await conversations.prepare_turn(
+        user=user,
+        conversation_id=int(payload.conversation_id) if payload.conversation_id else None,
+        message=payload.message,
+        model=service.model,
+        prompt_id=prompt.id,
+        prompt_version=prompt.version,
     )
+
+
+def _parse_message_id(raw: str) -> int:
+    if not raw.isdigit():
+        raise NotFoundError("消息不存在")
+    return int(raw)
+
+
+def _sid(value: int | None) -> str | None:
+    """雪花 ID → 字符串。19 位整数直接给前端，`JSON.parse` 会把末几位抹掉。"""
+    return None if value is None else str(value)
 
 
 @router.get(
@@ -147,7 +280,7 @@ def _meta(finished: StreamFinished) -> StreamMeta:
     description="探测 LLM 是否已配置、当前使用哪版提示词，不打真网络。",
 )
 async def chat_status(
-    service: LLMService = Depends(get_llm_service),
+    service: Annotated[LLMService, Depends(get_llm_service)],
 ) -> ApiResponse[ChatStatusResponse]:
     prompt = service.prompt
     return ok(

@@ -49,6 +49,30 @@ class LLMUpstreamError(ServiceError):
         super().__init__(f"LLM 上游服务异常：{reason}")
 
 
+class StreamExpiredError(ServiceError):
+    """续传时缓冲已不在（TTL 到期 / 进程重启过）。
+
+    「过期」和「不存在」必须分开：前者消息还在库里，客户端应该去拉全文；
+    后者是真的没有这条消息（或不属于当前用户），拉也拉不到。
+    都回 404 会让前端误以为消息被删了。
+    """
+
+    default_code = ErrorCode.CHAT_STREAM_EXPIRED
+
+
+class StreamNotConfiguredError(ServiceError):
+    """没配 Redis：流式对话的续传缓冲无处可放。
+
+    不静默降级成"不可续传的流"—— 那会让客户端以为拿到了可续传的 id，
+    断线后才发现接不上，且行为随部署环境漂移，很难排查。
+    """
+
+    default_code = ErrorCode.SERVICE_UNAVAILABLE
+
+    def __init__(self) -> None:
+        super().__init__("流式对话需要 Redis：请设置 REDIS_PASSWORD 后重启服务")
+
+
 # --------------------------------------------------------------------- 鉴权
 
 
@@ -113,6 +137,34 @@ class VerificationCodeError(ServiceError):
 
     def __init__(self, message: str = "验证码不正确或已过期") -> None:
         super().__init__(message)
+
+
+class CaptchaInvalidError(ServiceError):
+    """人机验证票据缺失 / 无效 / 已被使用。
+
+    与邮箱验证码共用 11400：票据缺失和验签不通过也返回同一个错误码，
+    区分了等于告诉攻击者"服务端开了人机验证、但你的请求格式不对"。
+    文案在这里覆盖默认值，让用户看到的是"重新做人机验证"而不是"查邮件"。
+    """
+
+    default_code = ErrorCode.AUTH_CODE_INVALID
+
+    def __init__(self, message: str = "人机验证未通过，请重新验证") -> None:
+        super().__init__(message)
+
+
+class CaptchaUpstreamError(ServiceError):
+    """VAPTCHA Verify 接口超时 / 不可达 / 非 200。
+
+    fail-closed：验签服务挂了就拒绝发码，而不是放行。
+    开着人机验证却在上游故障时放行，等于给攻击者一个"打挂验签就免验证"的按钮。
+    与 LLM_TIMEOUT（22504）同构取 504；原始异常挂 __cause__，响应只给中性文案。
+    """
+
+    default_code = ErrorCode.CAPTCHA_UPSTREAM_ERROR
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"人机验证服务异常：{reason}")
 
 
 class AuthRateLimitedError(ServiceError):

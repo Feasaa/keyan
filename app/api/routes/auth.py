@@ -2,6 +2,7 @@
 
 流程（注册）：
     POST /auth/verification-code   → 给邮箱发 6 位码（Redis 存哈希，5 分钟）
+                                     配置了 VAPTCHA 时先过人机验签，再消耗发码配额
     POST /auth/register            → 邮箱 + 密码 + 码，验过即建号并直接返回令牌
 
 流程（登录）：
@@ -77,10 +78,15 @@ async def send_verification_code(
 
     不返回验证码本身，也不返回"该邮箱是否已注册" ——
     后者会让这个接口变成账号枚举工具。
+
+    服务端配置了 VAPTCHA 时，请求体必须带前端 SDK validate() 的
+    token / knock（dfu、ip 可选），验签不过不发码；
+    未配置时这些字段可整体省略。
     """
     expires_in, resend_after = await service.send_register_code(
         email=payload.email,
         scene=payload.scene,
+        captcha=payload,
         client_ip=client_ip(request),
     )
     return ok(

@@ -25,7 +25,7 @@ from app.db.base import utcnow
 from app.db.enums import UserStatus
 from app.db.models import User
 from app.repositories import AuthSessionRepository, UserRepository
-from app.schemas.auth import VerificationScene
+from app.schemas.auth import CaptchaPayload, VerificationScene
 from app.services.exceptions import (
     AccountDisabledError,
     AuthNotConfiguredError,
@@ -34,6 +34,7 @@ from app.services.exceptions import (
     SessionInvalidError,
 )
 from app.services.login_throttle import LoginThrottle
+from app.services.vaptcha_service import VaptchaService
 from app.services.verification_service import VerificationService
 from app.utils.masking import mask_email
 from app.utils.net import pack_ip
@@ -53,11 +54,13 @@ class AuthService:
         session: AsyncSession,
         verification: VerificationService,
         throttle: LoginThrottle,
+        vaptcha: VaptchaService,
         settings: Settings,
     ) -> None:
         self._session = session
         self._verification = verification
         self._throttle = throttle
+        self._vaptcha = vaptcha
         self._settings = settings
         self._users = UserRepository(session)
         self._sessions = AuthSessionRepository(session)
@@ -65,9 +68,17 @@ class AuthService:
     # ------------------------------------------------------------------ 发码
 
     async def send_register_code(
-        self, *, email: str, scene: VerificationScene, client_ip: str | None
+        self,
+        *,
+        email: str,
+        scene: VerificationScene,
+        captcha: CaptchaPayload,
+        client_ip: str | None,
     ) -> tuple[int, int]:
         self._ensure_configured()
+        # 人机验签在最前面：排在三层限流 / 发信配额消费之前，
+        # "人机没过却花掉一次配额"的中间态就不存在了（docs/05-auth.md 定的接入点）。
+        await self._vaptcha.verify(captcha, client_ip=client_ip)
         return await self._verification.issue(email=email, scene=scene.value, client_ip=client_ip)
 
     # ------------------------------------------------------------------ 注册

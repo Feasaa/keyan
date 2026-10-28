@@ -33,7 +33,23 @@ class VerificationScene(StrEnum):
     REGISTER = "register"
 
 
-class SendCodeRequest(BaseModel):
+class CaptchaPayload(BaseModel):
+    """VAPTCHA 前端 SDK `validate()` 成功后的四件套。
+
+    原样透传给业务服务器，由服务端拿 VKey 二次验签 ——
+    字段名与 SDK 返回保持一致，前端不用做任何转换。
+    服务端未配置 VAPTCHA 时这四个字段全部可省略（功能关闭 = 直接放行）。
+    """
+
+    token: str = Field("", max_length=1024, description="验证通过后的令牌")
+    knock: str = Field("", max_length=256, description="本次验证的流水号")
+    dfu: str = Field("", max_length=2048, description="设备指纹")
+    # SDK 返回的"签名 IP"：优先用它参与验签，而不是服务端自己猜的来源 IP。
+    # 放宽到 64：可能是 IPv4/IPv6 或带端口的形态，交给 VAPTCHA 去判。
+    ip: str = Field("", max_length=64, description="SDK 返回的签名 IP")
+
+
+class SendCodeRequest(CaptchaPayload):
     email: EmailStr = Field(description="接收验证码的邮箱")
     scene: VerificationScene = Field(
         VerificationScene.REGISTER, description="验证码用途，目前仅注册"

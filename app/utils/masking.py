@@ -7,7 +7,7 @@
 
 
 def mask_email(email: str) -> str:
-    """`1512669182@qq.com` → `1512***@qq.com`。
+    """`zhangsan@example.com` → `zh***@example.com`。
 
     保留首尾是为了排障时还能对上是谁（同域名下前几位足够区分），
     中间的星号保证即使日志外泄也无法直接用于撞库或发信。

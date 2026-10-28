@@ -42,3 +42,19 @@ class MessageStatus(IntEnum):
     COMPLETE = 1
     INTERRUPTED = 2
     FAILED = 3
+
+
+class MessageFeedback(IntEnum):
+    """用户对单条回复的手动评价。
+
+    NONE 不是"中立"，而是"没评价过"。必须区分这两件事：
+    统计满意度时分母只能是"评价过的条数"，把没表态的算成中立，
+    好评率会被稀释成一个永远接近 50% 的假数字。
+
+    赞/踩之外不设中间档：五个档位的评价在 UI 上没人用，
+    在数据上又没法解释 —— 要么有用要么没用，要么说不清就不要。
+    """
+
+    NONE = 0
+    UP = 1
+    DOWN = 2

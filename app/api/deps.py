@@ -15,14 +15,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, get_settings
 from app.core.errors import UnauthorizedError
 from app.core.security import decode_access_token
-from app.db import get_redis, get_session
+from app.db import get_redis, get_session, get_session_factory
 from app.db.enums import UserStatus
 from app.db.models import User
 from app.repositories import UserRepository
 from app.services.auth_service import AuthService
-from app.services.exceptions import AuthNotConfiguredError
+from app.services.conversation_service import ConversationService
+from app.services.exceptions import AuthNotConfiguredError, StreamNotConfiguredError
 from app.services.login_throttle import LoginThrottle
 from app.services.mail_service import MailService, get_mail_service
+from app.services.stream_hub import StreamBuffer
+from app.services.vaptcha_service import VaptchaService
 from app.services.verification_service import VerificationService
 
 logger = logging.getLogger(__name__)
@@ -71,13 +74,26 @@ def get_login_throttle(
     return LoginThrottle(get_redis(), settings)
 
 
+def get_vaptcha_service(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> VaptchaService:
+    """人机验证服务。
+
+    未配置 VID/VKey 时**不报错**，返回 disabled 实例由 verify() 放行 ——
+    人机验证是可选加固，不该让"没申请 VAPTCHA 的开发者"连服务都起不来。
+    Redis 只在 local 模式用（票据一次性标记），没配降级为重放检测关闭。
+    """
+    return VaptchaService(settings, redis=get_redis() if settings.redis_configured else None)
+
+
 def get_auth_service(
     session: Annotated[AsyncSession, Depends(get_session)],
     verification: Annotated[VerificationService, Depends(get_verification_service)],
     throttle: Annotated[LoginThrottle, Depends(get_login_throttle)],
+    vaptcha: Annotated[VaptchaService, Depends(get_vaptcha_service)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> AuthService:
-    return AuthService(session, verification, throttle, settings)
+    return AuthService(session, verification, throttle, vaptcha, settings)
 
 
 async def get_current_user(
@@ -103,3 +119,30 @@ async def get_current_user(
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+def get_conversation_service(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ConversationService:
+    """会话服务。
+
+    注意它拿的是 **session factory** 而不是当前请求的 session：
+    流式对话要跨越整条 SSE 流，用请求级 session 会把一条数据库连接
+    占住几分钟。理由写在 ConversationService 的模块注释里。
+    """
+    return ConversationService(get_session_factory(), settings)
+
+
+def get_stream_buffer(
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> StreamBuffer:
+    """流式分片缓冲。
+
+    Redis 是硬依赖：续传要求"生成活过连接"，分片必须存在一个
+    **跨进程可达**的地方。没配 Redis 就直接 503 说清楚 ——
+    悄悄降级成"不可续传的流"会让客户端拿着续不上的 id 去重连，
+    而且行为随部署环境漂移，比直接报错难查得多。
+    """
+    if not settings.redis_configured:
+        raise StreamNotConfiguredError()
+    return StreamBuffer(get_redis(), settings.SSE_RESUME_TTL_SECONDS)

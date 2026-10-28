@@ -17,6 +17,7 @@ from app.core.exception_handlers import register_exception_handlers
 from app.core.middleware import TRACE_ID_HEADER, RequestContextMiddleware
 from app.db import close_redis, dispose_engine
 from app.prompts import get_prompt_registry
+from app.services.stream_hub import TurnRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -57,14 +58,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     sse_shutdown 由 EventSourceResponse 消费：收到 set 后，进行中的流会
     发一个 shutdown 事件并主动关闭连接，而不是被进程退出硬切断。
+
+    关闭顺序是有讲究的，不能调换：
+        1. set sse_shutdown     让消费端不再等新帧
+        2. 取消生产者任务并等收尾  它们还要写库（INTERRUPTED）和写 Redis
+        3. 释放 DB / Redis 连接池  收尾完成之后才能关
+    反过来的话，第 2 步的写库会因为引擎已 dispose 而抛错，
+    那条消息就永远停在 STREAMING，谁也不知道它当时说到哪儿了。
     """
     # 提示词在包外的 PROMPTS_DIR 里（容器通常挂载进来），路径配错、
     # 正文写坏都要在启动时就炸掉 —— 否则要等第一个用户请求才 500。
     get_prompt_registry()
     app.state.sse_shutdown = anyio.Event()
+    app.state.turn_registry = TurnRegistry()
     yield
     # 先让在途的流收尾（它们可能还要写库），再释放连接池
     app.state.sse_shutdown.set()
+    await app.state.turn_registry.shutdown()
     await dispose_engine()
     await close_redis()
 

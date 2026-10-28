@@ -18,6 +18,13 @@ tests/test_sql_injection.py 会扫源码拦住这种写法，光靠 code review 
 """
 
 from app.repositories.auth_session_repository import AuthSessionRepository
+from app.repositories.conversation_repository import ConversationRepository
+from app.repositories.message_repository import MessageRepository
 from app.repositories.user_repository import UserRepository
 
-__all__ = ["AuthSessionRepository", "UserRepository"]
+__all__ = [
+    "AuthSessionRepository",
+    "ConversationRepository",
+    "MessageRepository",
+    "UserRepository",
+]

@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     # SSE：ping 注释的间隔（秒）。要小于网关/负载均衡的空闲超时（常见 60s）
     SSE_PING_SECONDS: float = 15.0
 
+    # 断线续传：一轮生成结束后，Redis 里的分片缓冲还能留多久（秒）。
+    # 太短 = 手机切个后台回来就续不上了；太长 = 白占内存。
+    # 过期后续传接口返回 410，客户端改用 GET 消息列表拿全文。
+    SSE_RESUME_TTL_SECONDS: int = 600
+
+    # 断线续传：**所有**客户端都断开多久之后停止生成（秒）。
+    # 续传要求生成活过连接，所以断线不能立刻停 —— 但一直开着就是白烧 token。
+    # 这个值就是"离开多久算放弃"的界线，客户端在窗口内重连都能无缝接上。
+    SSE_RESUME_GRACE_SECONDS: int = 30
+
     # 就绪探针里单个依赖检查的超时（秒）。
     # 必须远小于编排系统的探针超时（k8s 默认 1s/次、失败 3 次摘流量），
     # 否则"探针在等 MySQL"会被当成"探针挂了"，把所有实例一起摘掉。
@@ -57,6 +67,11 @@ class Settings(BaseSettings):
     LLM_TIMEOUT_SECONDS: float = 60.0
     LLM_MAX_RETRIES: int = 2
     LLM_TEMPERATURE: float = 0.7
+
+    # 每轮对话给模型喂多少条历史消息（从数据库按会话加载）。
+    # 越长越贵，而且早期内容对当前轮次的帮助衰减得很快；
+    # 这里也是上下文窗口的第一道闸，别指望模型自己"忽略多余的"。
+    CHAT_CONTEXT_MESSAGES: int = 20
 
     # ---- 提示词 ----
     # 正文是内容、不是代码，所以放在仓库根的 prompts/ 而不是 app/ 包里：
@@ -131,6 +146,30 @@ class Settings(BaseSettings):
     SMTP_FROM_NAME: str = "AI 助手"
     SMTP_TIMEOUT_SECONDS: float = 10.0
 
+    # ---- 人机验证（VAPTCHA V4）----
+    # VID / VKey 都来自 VAPTCHA 控制台的验证单元。**VKey 只能放服务端**，
+    # 写进前端等于把验签能力公开（拿到 VKey 就能伪造验签通过）。
+    # 两者任一为空 = 人机验证关闭，发码照常、票据不校验 ——
+    # 与 LLM_API_KEY / JWT_SECRET 同一套开关语义，本地开发不必人人申请一套。
+    #
+    # 注意：V2 时代的 api.vaptcha.com / 0.vaptcha.com 已 NXDOMAIN，
+    # V4 的验签端点是 v41.vaptcha.com/api/verify（JSON 提交，非 form）。
+    VAPTCHA_VID: str = ""
+    VAPTCHA_VKEY: str = ""
+    # remote：调官方接口（默认）。IP 漂移判定与票据复用检测由官方兜底，集成最省心。
+    # local ：本地 HMAC-SHA256 校验（少一次外网往返），用 Redis 保证票据一次性。
+    VAPTCHA_VERIFY_MODE: str = "remote"
+    VAPTCHA_VERIFY_URL: str = "https://v41.vaptcha.com/api/verify"
+    VAPTCHA_TIMEOUT_SECONDS: float = 5.0
+    # 本地校验的票据有效期（秒）。token 里带签发时间戳，超过这个窗口视为过期。
+    # 官方文档：token 本身的校验窗口是 30 秒，并**建议本地验签取 3 秒**
+    # （"本地验签建议使用 3 秒有效期，并对已通过的 token 做防复用"）。
+    # 窗口就是重放空间，所以默认跟官方建议一致，不要图省事设成分钟级。
+    VAPTCHA_LOCAL_TTL_SECONDS: int = 3
+    # 官方接口返回 data.code=1（"鉴权不通过但 token 存在"）时是否放行。
+    # 默认严格拒绝；政企老宽带的 IP 会随机漂移，需要兼容时再打开。
+    VAPTCHA_ALLOW_CODE_1: bool = False
+
     # ---- 邮箱验证码 ----
     # TTL 与重发冷却分开：TTL 是"这个码多久失效"，冷却是"多久能再要一个"。
     VERIFICATION_CODE_TTL_SECONDS: int = 5 * 60
@@ -196,6 +235,11 @@ class Settings(BaseSettings):
     def mail_configured(self) -> bool:
         """发件账号和授权码都齐了才算可用。"""
         return bool(self.SMTP_USER and self.SMTP_PASSWORD)
+
+    @property
+    def vaptcha_configured(self) -> bool:
+        """VID 和 VKey 都配了才启用人机验证，缺一个都算关闭。"""
+        return bool(self.VAPTCHA_VID and self.VAPTCHA_VKEY)
 
     @property
     def smtp_use_ssl(self) -> bool:

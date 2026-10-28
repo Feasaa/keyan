@@ -12,7 +12,7 @@ usage_metadata / response_metadata 一起丢掉，`ChatResponse.usage`
 """
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -23,7 +23,7 @@ from langchain_openai import ChatOpenAI
 
 from app.core.config import Settings, get_settings
 from app.prompts import Prompt, PromptKey, get_prompt
-from app.schemas.chat import ChatRequest
+from app.schemas.chat import ChatMessage, ChatRequest
 from app.services.exceptions import LLMNotConfiguredError, LLMUpstreamError
 
 logger = logging.getLogger(__name__)
@@ -103,16 +103,18 @@ class LLMService:
         if self._chain is None:
             raise LLMNotConfiguredError()
 
-    def _chain_inputs(self, payload: ChatRequest, prompt: Prompt) -> dict:
+    def _chain_inputs(
+        self, payload: ChatRequest, prompt: Prompt, history: Sequence[ChatMessage]
+    ) -> dict:
         return {
             "system_prompt": prompt.text,
-            "history": [(msg.role, msg.content) for msg in payload.history],
+            "history": [(msg.role, msg.content) for msg in history],
             "message": payload.message,
         }
 
     # ------------------------------------------------------------------ 调用
 
-    async def achat(self, payload: ChatRequest) -> ChatResult:
+    async def achat(self, payload: ChatRequest, history: Sequence[ChatMessage] = ()) -> ChatResult:
         """一次性返回完整回答。
 
         必须是 async + `ainvoke`：这是一个 async 端点，事件循环上同时挂着
@@ -136,7 +138,7 @@ class LLMService:
             prompt.checksum,
         )
         try:
-            message: Any = await chain.ainvoke(self._chain_inputs(payload, prompt))
+            message: Any = await chain.ainvoke(self._chain_inputs(payload, prompt, history))
         except Exception as exc:
             raise LLMUpstreamError(type(exc).__name__) from exc
 
@@ -147,7 +149,9 @@ class LLMService:
             usage=_usage_dict(finished),
         )
 
-    async def astream_chat(self, payload: ChatRequest) -> AsyncIterator[StreamEvent]:
+    async def astream_chat(
+        self, payload: ChatRequest, history: Sequence[ChatMessage] = ()
+    ) -> AsyncIterator[StreamEvent]:
         """流式产出结构化事件（基于 astream_events）。
 
         为什么用 astream_events 而不是 astream：
@@ -174,7 +178,7 @@ class LLMService:
         )
         try:
             async for event in chain.astream_events(
-                self._chain_inputs(payload, prompt), version="v2"
+                self._chain_inputs(payload, prompt, history), version="v2"
             ):
                 kind = event["event"]
                 if kind == "on_chat_model_stream":

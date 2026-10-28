@@ -58,12 +58,12 @@ def test_config_prompt_id_resolves() -> None:
 
 
 def test_prompt_text_is_injected_into_chain(
-    client: TestClient, stub_llm: Callable[..., Any]
+    auth_client: TestClient, auth_headers: dict[str, str], stub_llm: Callable[..., Any]
 ) -> None:
     """提示词从文件读出来，作为 system_prompt 传给链 —— 不是写死在链里。"""
     stub = stub_llm()
 
-    client.post(CHAT, json={"message": "你好"})
+    auth_client.post(CHAT, json={"message": "你好"}, headers=auth_headers)
 
     assert stub.calls[0]["system_prompt"] == get_prompt(PromptKey.CHAT_SYSTEM).text
 

@@ -23,6 +23,44 @@ from sqlalchemy.ext.asyncio import (
 from app.core.config import get_settings
 
 
+def _patch_aiomysql_escape() -> None:
+    """补上 aiomysql 与新版 PyMySQL 的转义兼容。
+
+    PyMySQL 1.2 起把 `converters.escape_bytes_prefixed` 换成了**字符串占位符**
+    （值就是 "DO NOT IMPORT THIS!!!"），目的是让 aiomysql 的 `from ... import`
+    不报 ImportError；但 aiomysql 0.3.2 仍然把它当函数调用，于是任何带 bytes
+    参数的 SQL —— 刷新令牌哈希这类列 —— 都会在 INSERT 时抛：
+
+        TypeError: 'str' object is not callable
+
+    这种错误只在真连 MySQL 时出现，用 SQLite 跑的测试完全发现不了。
+    所以启动时补一次：名字不可调用就换成 PyMySQL 现在真正提供的 escape_bytes。
+    """
+    try:
+        import aiomysql.connection as aiomysql_connection
+        from pymysql import converters
+    except ImportError:
+        # 非 MySQL 驱动（比如测试用 SQLite）直接跳过
+        return
+
+    if callable(getattr(converters, "escape_bytes_prefixed", None)):
+        return
+
+    replacement = getattr(converters, "escape_bytes", None)
+    if not callable(replacement):
+        # 两个名字都不可用时不自造转义实现：转义写错是注入风险，
+        # 让它在启动阶段显式失败，比在生产里悄悄拼错 SQL 强。
+        raise RuntimeError(
+            "PyMySQL 与 aiomysql 版本不兼容（escape_bytes_prefixed 不可调用），"
+            '请安装 PyMySQL<1.2：pip install "PyMySQL>=1.1,<1.2"'
+        )
+
+    # aiomysql 里是 `from ... import escape_bytes_prefixed`，
+    # 模块级名字已经指向那个字符串，两个位置都得换
+    converters.escape_bytes_prefixed = replacement
+    aiomysql_connection.escape_bytes_prefixed = replacement
+
+
 @lru_cache(maxsize=1)
 def get_engine() -> AsyncEngine:
     """进程级引擎：内部持有连接池，绝不能每请求新建。
@@ -33,6 +71,8 @@ def get_engine() -> AsyncEngine:
     settings = get_settings()
     if not settings.db_configured:
         raise RuntimeError("数据库未配置：请在 .env 里设置 DB_PASSWORD")
+
+    _patch_aiomysql_escape()
 
     return create_async_engine(
         settings.database_url,

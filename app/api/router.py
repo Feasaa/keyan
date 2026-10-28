@@ -6,10 +6,14 @@
 
 from fastapi import APIRouter
 
-from app.api.routes import auth, chat, health
+from app.api.routes import auth, chat, conversations, health, messages
 
 api_router = APIRouter()
 
 api_router.include_router(auth.router, prefix="/auth", tags=["鉴权"])
 api_router.include_router(health.router, prefix="/health", tags=["健康检查"])
 api_router.include_router(chat.router, prefix="/chat", tags=["对话"])
+# 会话是对话的"容器"，两级资源分开挂：/conversations/{id}/messages 读历史，
+# /messages/{id}/feedback 写评价 —— 评价的对象是消息，不是会话
+api_router.include_router(conversations.router, prefix="/conversations", tags=["会话"])
+api_router.include_router(messages.router, prefix="/messages", tags=["消息"])
