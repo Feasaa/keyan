@@ -47,7 +47,9 @@ class RegisterRequest(BaseModel):
         description=f"{PASSWORD_MIN_LENGTH}–{PASSWORD_MAX_LENGTH} 位，不限字符类型",
     )
     code: str = Field(pattern=r"^\d{6}$", description="6 位邮箱验证码")
-    nickname: str = Field("", max_length=64, description="展示名，留空则用邮箱前缀")
+    nickname: str = Field(
+        "", max_length=64, description="展示名，可留空（存空串，前端可回退显示邮箱前缀）"
+    )
 
     @field_validator("email")
     @classmethod

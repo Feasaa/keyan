@@ -45,7 +45,7 @@ def _profile(user: User) -> UserProfile:
     时间统一带 UTC 时区再序列化：库里存的是 naive UTC（见 app/db/base.py），
     直接吐出去会是 `2026-10-28T04:00:00` 这种没有时区的字符串，
     前端 new Date() 会按**浏览器本地时区**解析，直接错 8 小时。
-    加上 tzinfo 后输出 `+00:00`，前端转本地时间才是对的。
+    加上 tzinfo 后输出带 `Z` 后缀的 UTC 时间，前端转本地时间才是对的。
     """
     return UserProfile(
         id=str(user.id),

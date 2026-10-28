@@ -117,7 +117,8 @@ sr/
 │   ├── 03-data-layer.md        # 雪花 ID / 仓储 / Alembic
 │   ├── 04-api-contract.md      # 统一响应 / 错误码 / SSE / 探针 / 提示词
 │   ├── 05-auth.md              # 双令牌 / 验证码 / 防注入 / 账号权限
-│   └── 06-roadmap.md           # 后续练习方向
+│   ├── 06-roadmap.md           # 后续练习方向
+│   └── 07-api-examples.md      # 前端调用示例（TS 类型 + 客户端 + SSE 解析）
 ├── prompts/                    # 提示词正文（内容资产，不属于代码包）
 │   └── chat_system.md          # 正文 + 元数据（id / version / description）
 ├── docker-compose.yml          # MySQL 8.4 LTS + Redis 7.4（必须在根目录，见 02）

@@ -50,6 +50,7 @@ ruff check . && ruff format --check .
 | [04 接口契约](docs/04-api-contract.md) | 统一响应外壳、错误码编码规则、异常四类通道、对话与 SSE、健康探针、提示词热更新 |
 | [05 鉴权与安全](docs/05-auth.md) | 双令牌与轮换、邮箱验证码三层限流、**防 SQL 注入四层防线**、数据库账号 DML/DDL 分离 |
 | [06 下一步](docs/06-roadmap.md) | 按难度递增的后续练习方向 |
+| [07 前端接口调用示例](docs/07-api-examples.md) | **给前端的**：TS 类型、可直接用的客户端、SSE 解析、错误码处理策略 |
 
 ---
 
