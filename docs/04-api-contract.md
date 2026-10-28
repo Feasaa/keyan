@@ -165,9 +165,9 @@ prompt | model | parser
 
 > system 用占位符而不是建链时写死，是为了让提示词可热更新：改文件不影响已建好的链和 httpx 连接池，下一次请求自动用新内容。
 
-## 提示词管理（app/prompts/）
+## 提示词管理
 
-提示词是**数据**，不是代码常量。正文放 Markdown 文件，元数据写在 front matter：
+提示词是**数据**，不是代码常量。正文放仓库根的 `prompts/` 目录，元数据写在 front matter：
 
 ```markdown
 ---
@@ -179,11 +179,19 @@ description: 对话场景的系统提示词（角色 / 约束 / 风格）
 ...
 ```
 
-| 文件 | 作用 |
+| 路径 | 作用 |
 | --- | --- |
-| `prompts/files/chat_system.md` | 提示词正文 + `id` / `version` / `description` |
-| `prompts/loader.py` | 解析 front matter 并校验，不合法直接抛错 |
-| `prompts/registry.py` | 按 id 取用，按文件 mtime 判断是否重载 |
+| `prompts/chat_system.md` | 提示词正文 + `id` / `version` / `description`（**内容，不在包里**） |
+| `app/prompts/loader.py` | 解析 front matter 并校验，不合法直接抛错 |
+| `app/prompts/registry.py` | 按 id 取用，按文件 mtime 判断是否重载 |
+
+**为什么正文不在 `app/` 包里**：提示词是内容资产，和代码的变更节奏、变更人都不一样。放进包里会有三个具体后果：
+
+1. **改一句文案要重新打包发版** —— 提示词迭代频率远高于代码，绑在一起等于把文案改动升级成一次发布。
+2. **`.md` 混进代码目录** —— 搜代码、跑静态检查、看目录树时都是噪声。
+3. **非开发人员改不了** —— 产品和运营调提示词，不该先进源码树。
+
+目录位置由 `PROMPTS_DIR` 决定：相对路径按仓库根解析，容器里挂载到别处就填绝对路径（如 `PROMPTS_DIR=/app/prompts`，`-v ./prompts:/app/prompts:ro`）。改提示词不必重启，也不必重建镜像。
 
 三条硬规则（都在 `loader.py` 里强制执行）：
 
@@ -191,12 +199,12 @@ description: 对话场景的系统提示词（角色 / 约束 / 风格）
 2. **`version` 必须是正整数** —— 版本是排障的锚点，不能写成 `v2`、`latest`。
 3. **正文不能为空** —— 空提示词会让模型行为完全失控。
 
-启动时加载失败会直接让进程起不来（快速失败）；运行期重载失败则**保留旧版本**并记 error 日志——宁可继续用旧提示词，也不能因为一次手误让线上进入"无提示词"状态。
+启动时加载失败会直接让进程起不来（`lifespan` 里显式加载一次，快速失败）；运行期重载失败则**保留旧版本**并记 error 日志——宁可继续用旧提示词，也不能因为一次手误让线上进入"无提示词"状态。
 
 改提示词不用重启：
 
 ```powershell
-# 1. 改 app/prompts/files/chat_system.md（顺手把 version +1）
+# 1. 改 prompts/chat_system.md（顺手把 version +1）
 # 2. 下一次请求自动生效，可查证
 curl.exe http://127.0.0.1:8000/api/v1/chat/status
 # {"prompt_id":"chat_system","prompt_version":2,...}
@@ -206,6 +214,6 @@ curl.exe http://127.0.0.1:8000/api/v1/chat/status
 
 **为什么合并成一条 system prompt**：之前拆成 `system` + `assistant` 两段再拼接，是生造的分类。业界按用途分（聊天/抽取/分类），一个聊天场景就是一条 system prompt，角色、约束、风格写在里面用标题分段。两段拼接的隐患是**指令冲突时谁赢不确定**——system 说"简洁"、assistant 说"展开讲"，模型行为会飘。
 
-新增提示词：放一个新 `.md` 到 `files/`，在 `registry.py` 的 `PromptKey` 加一行，然后 `PROMPT_CHAT_SYSTEM_ID` 指过去即可。
+新增提示词：放一个新 `.md` 到 `prompts/`（`id` 与文件名一致），在 `app/prompts/registry.py` 的 `PromptKey` 加一行，然后 `PROMPT_CHAT_SYSTEM_ID` 指过去即可。
 
 ---

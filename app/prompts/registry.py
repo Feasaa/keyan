@@ -10,7 +10,7 @@ import logging
 from enum import StrEnum
 from pathlib import Path
 
-from app.prompts.loader import PROMPTS_DIR, Prompt, PromptConfigError, load_all
+from app.prompts.loader import Prompt, PromptConfigError, load_all
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ class PromptKey(StrEnum):
 class PromptRegistry:
     """进程内提示词表，启动时全量加载，之后按需重载。"""
 
-    def __init__(self, directory: Path = PROMPTS_DIR) -> None:
+    def __init__(self, directory: Path) -> None:
         self._directory = directory
         self._prompts = load_all(directory)
         self._mtimes = self._snapshot()

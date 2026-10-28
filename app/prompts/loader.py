@@ -12,6 +12,9 @@
 只解析 `key: value` 形式的简单元数据，不引入 YAML 依赖 ——
 元数据只有三个固定字段，为它装一个解析库不值得。
 
+目录由调用方传入（见 app/core/config.py 的 PROMPTS_DIR），本模块不猜路径：
+提示词是内容而不是代码，位置要能被环境变量和容器挂载覆盖。
+
 校验规则（任一不满足都抛 PromptConfigError，让问题在启动时暴露）：
     id 必须存在且与文件名一致   防止改文件名后引用错位
     version 必须是正整数        版本是排障的锚点，不能是自由文本
@@ -21,8 +24,6 @@
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-
-PROMPTS_DIR = Path(__file__).resolve().parent / "files"
 
 _DELIMITER = "---"
 
@@ -93,7 +94,7 @@ def load_prompt(path: Path) -> Prompt:
     )
 
 
-def load_all(directory: Path = PROMPTS_DIR) -> dict[str, Prompt]:
+def load_all(directory: Path) -> dict[str, Prompt]:
     """加载目录下全部提示词，按 id 建索引。"""
     if not directory.is_dir():
         raise PromptConfigError(f"提示词目录不存在：{directory}")

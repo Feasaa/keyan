@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.core.exception_handlers import register_exception_handlers
 from app.core.middleware import RequestContextMiddleware
 from app.db import close_redis, dispose_engine
+from app.prompts import get_prompt_registry
 
 
 @asynccontextmanager
@@ -24,6 +25,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     sse_shutdown 由 EventSourceResponse 消费：收到 set 后，进行中的流会
     发一个 shutdown 事件并主动关闭连接，而不是被进程退出硬切断。
     """
+    # 提示词在包外的 PROMPTS_DIR 里（容器通常挂载进来），路径配错、
+    # 正文写坏都要在启动时就炸掉 —— 否则要等第一个用户请求才 500。
+    get_prompt_registry()
     app.state.sse_shutdown = anyio.Event()
     yield
     # 先让在途的流收尾（它们可能还要写库），再释放连接池

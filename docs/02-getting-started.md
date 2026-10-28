@@ -66,7 +66,7 @@ alembic check                  # 应输出 No new upgrade operations detected
 
 ## 配置项（.env）
 
-`LLM_API_KEY`（不填 = 功能关闭，主服务不受影响）、`LLM_BASE_URL`（OpenAI 兼容网关）、`LLM_MODEL`、`LLM_TIMEOUT_SECONDS`、`LLM_MAX_RETRIES`、`LLM_TEMPERATURE`、`SSE_PING_SECONDS`、`PROMPT_CHAT_SYSTEM_ID`（用哪份提示词）。提示词正文不在配置里，在 `app/prompts/files/*.md`。
+`LLM_API_KEY`（不填 = 功能关闭，主服务不受影响）、`LLM_BASE_URL`（OpenAI 兼容网关）、`LLM_MODEL`、`LLM_TIMEOUT_SECONDS`、`LLM_MAX_RETRIES`、`LLM_TEMPERATURE`、`SSE_PING_SECONDS`、`PROMPT_CHAT_SYSTEM_ID`（用哪份提示词）、`PROMPTS_DIR`（提示词目录，默认 `prompts`）。提示词正文不在配置里，在 `prompts/*.md`。
 
 安全要点：历史消息 role 白名单只允许 `user`/`assistant` —— 客户端伪造 `system` 角色会被 422 拦截（防提示注入）；系统提示词仅由服务端配置注入。
 

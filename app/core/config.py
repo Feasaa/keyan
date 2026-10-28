@@ -4,10 +4,12 @@
 """
 
 from functools import lru_cache
+from pathlib import Path
 from urllib.parse import quote_plus
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.paths import resolve_path
 from app.prompts import PromptKey
 
 
@@ -51,8 +53,12 @@ class Settings(BaseSettings):
     LLM_MAX_RETRIES: int = 2
     LLM_TEMPERATURE: float = 0.7
 
-    # 提示词：配置里只存"用哪个 id"，正文由 app/prompts/files/*.md 提供。
-    # 这样切提示词变体（灰度/租户）只改环境变量，不必动代码。
+    # ---- 提示词 ----
+    # 正文是内容、不是代码，所以放在仓库根的 prompts/ 而不是 app/ 包里：
+    # 改一句话不该触发重新打包，运维/产品也不该进源码目录才能改。
+    # 相对路径按仓库根解析；容器里挂载到别处时填绝对路径（如 /app/prompts）。
+    PROMPTS_DIR: str = "prompts"
+    # 配置里只存"用哪个 id"，这样切提示词变体（灰度/租户）只改环境变量。
     PROMPT_CHAT_SYSTEM_ID: str = PromptKey.CHAT_SYSTEM.value
 
     # 雪花 ID 机器号（0-1023）。单实例填 0 即可；
@@ -116,6 +122,11 @@ class Settings(BaseSettings):
     # 两层配额：按邮箱防单点轰炸，按 IP 防换邮箱刷
     VERIFICATION_DAILY_LIMIT_PER_EMAIL: int = 10
     VERIFICATION_HOURLY_LIMIT_PER_IP: int = 20
+
+    @property
+    def prompts_dir(self) -> Path:
+        """提示词目录的绝对路径（相对 PROMPTS_DIR 按仓库根解析）。"""
+        return resolve_path(self.PROMPTS_DIR)
 
     @property
     def db_configured(self) -> bool:

@@ -56,8 +56,7 @@ sr/
 │   │   ├── security.py         # 密码哈希（argon2id）+ 令牌签发/校验（≈ BCryptPasswordEncoder + JwtUtil）
 │   │   ├── snowflake.py        # 雪花 ID 生成器（时间有序、多实例不冲突）
 │   │   └── sse.py              # SSE 事件名与结束哨兵（帧编码交给 sse-starlette）
-│   ├── prompts/                # 提示词（正文是文件，不是代码常量）
-│   │   ├── files/chat_system.md  # 提示词正文 + 元数据（id / version / description）
+│   ├── prompts/                # 提示词"怎么读"：加载、校验、热更新（不含正文）
 │   │   ├── loader.py           # 加载与校验（不合法启动即失败）
 │   │   └── registry.py         # 按 id 取用 + 按 mtime 热更新
 │   ├── db/                     # 数据访问层（≈ repository + entity）
@@ -119,6 +118,8 @@ sr/
 │   ├── 04-api-contract.md      # 统一响应 / 错误码 / SSE / 探针 / 提示词
 │   ├── 05-auth.md              # 双令牌 / 验证码 / 防注入 / 账号权限
 │   └── 06-roadmap.md           # 后续练习方向
+├── prompts/                    # 提示词正文（内容资产，不属于代码包）
+│   └── chat_system.md          # 正文 + 元数据（id / version / description）
 ├── docker-compose.yml          # MySQL 8.4 LTS + Redis 7.4（必须在根目录，见 02）
 ├── environment.yml             # conda 环境：只声明解释器，用 -r 引用 requirements
 ├── requirements.txt            # 运行时依赖（唯一版本来源）
@@ -148,6 +149,8 @@ sr/
 **`app/services/`** — 业务规则的唯一归宿：可复用、可单测（不依赖 HTTP）、隔离框架（换 Web 框架不用重写业务）。LLM 的链构建、降级、超时重试，以及注册/登录的事务边界，全部收敛在这里，接口层只做协议适配。对应 `@Service`。
 
 **`tests/`** — 测试锁住的是**接口契约**而不是实现。LLM 用桩链、邮件用桩服务替换，不花钱、不依赖网络、结果可断言。
+
+**`prompts/`（在 `app/` 之外）** — 提示词是**内容资产**，不是代码。放包里会带来三个具体问题：改一句文案要重新打包发版；`.md` 混进代码目录，搜索代码时被噪声淹没；非开发人员得进源码树才能改。所以正文放仓库根，位置由 `PROMPTS_DIR` 决定（可指向容器挂载的绝对路径），`app/prompts/` 只保留"怎么读、怎么校验、怎么热更新"。
 
 ---
 

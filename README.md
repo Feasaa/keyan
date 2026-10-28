@@ -64,12 +64,13 @@ sr/
 │   ├── services/            # 业务规则（事务边界在这里）
 │   ├── repositories/        # SQL 的唯一落点
 │   ├── db/                  # ORM 模型 / 会话 / Redis / 物理类型
-│   ├── prompts/             # 提示词正文（.md）+ 加载器 + 注册表
+│   ├── prompts/             # 提示词"怎么读"：加载、校验、热更新（正文不在这里）
 │   └── utils/               # IP 编解码、日志脱敏
 ├── tests/                   # 契约测试（桩 LLM / 桩邮件，不依赖网络）
 ├── alembic/                 # 迁移脚本
 ├── deploy/                  # 容器侧配置（MySQL / Redis 的 cnf 与初始化脚本）
 ├── docs/                    # 本目录文档
+├── prompts/                 # 提示词正文（内容资产，不进代码包）
 ├── docker-compose.yml       # MySQL 8.4 LTS + Redis 7.4
 ├── requirements.txt         # 运行时依赖
 ├── requirements-dev.txt     # 开发/测试依赖（-r requirements.txt）
@@ -86,6 +87,7 @@ sr/
 - **表结构只有一个来源**：`alembic/versions/`。容器启动不建表，`deploy/mysql/initdb/` 只放权限脚本。
 - **依赖版本只有一个来源**：`requirements*.txt`。`environment.yml` 用 `-r` 引用，不重复列包。
 - **配置只有一个来源**：根目录 `.env`。应用与 `docker compose` 读同一个文件，密码不写两遍。
+- **内容资产不进代码包**：提示词正文在 `prompts/`，位置由 `PROMPTS_DIR` 决定，容器可挂载覆盖，改文案不必重新发版。
 - **错误出口只有两条**：HTTP 状态码（真实状态，不是一律 200）+ 统一外壳里的 `code`。流式接口额外走 SSE `event: error`。
 
 ---

@@ -5,8 +5,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import app.prompts as prompts_pkg
 import pytest
 from app.core.config import Settings
+from app.core.paths import BASE_DIR
 from app.prompts import PromptKey, get_prompt
 from app.prompts.loader import PromptConfigError
 from app.prompts.registry import PromptRegistry
@@ -64,6 +66,36 @@ def test_prompt_text_is_injected_into_chain(
     client.post(CHAT, json={"message": "你好"})
 
     assert stub.calls[0]["system_prompt"] == get_prompt(PromptKey.CHAT_SYSTEM).text
+
+
+# ------------------------------------------------------------------ 目录位置
+
+
+def test_prompt_dir_is_outside_the_code_package() -> None:
+    """提示词是内容不是代码：目录必须在 app/ 包外，改提示词不该动代码包。
+
+    之前正文放在 app/prompts/files/ 里，改一句话要重新打包发版，
+    非开发人员也得进源码目录才能改 —— 这条测试就是防止它再被搬回去。
+    """
+    directory = Settings(_env_file=None, PROMPTS_DIR="prompts").prompts_dir
+
+    assert directory.is_dir()
+    assert (directory / "chat_system.md").is_file()
+    package_dir = Path(prompts_pkg.__file__).resolve().parent
+    assert package_dir not in directory.parents
+
+
+def test_relative_prompt_dir_resolves_against_repo_root() -> None:
+    settings = Settings(_env_file=None, PROMPTS_DIR="prompts")
+
+    assert settings.prompts_dir == BASE_DIR / "prompts"
+
+
+def test_absolute_prompt_dir_is_used_as_is(tmp_path: Path) -> None:
+    """容器里把提示词挂到别处时配绝对路径，不能再拼 BASE_DIR。"""
+    settings = Settings(_env_file=None, PROMPTS_DIR=str(tmp_path))
+
+    assert settings.prompts_dir == tmp_path
 
 
 # ------------------------------------------------------------------ 加载校验
