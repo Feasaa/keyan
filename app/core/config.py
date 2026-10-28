@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     # 这样切提示词变体（灰度/租户）只改环境变量，不必动代码。
     PROMPT_CHAT_SYSTEM_ID: str = PromptKey.CHAT_SYSTEM.value
 
+    # 雪花 ID 机器号（0-1023）。单实例填 0 即可；
+    # 多实例部署时每台必须不同，否则会生成完全相同的 ID。
+    # 纪元写死在 app/core/snowflake.py，不开放配置 —— 改纪元会让新旧 ID 撞车。
+    SNOWFLAKE_WORKER_ID: int = 0
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -29,3 +29,7 @@ LLM_TEMPERATURE=0.7
 # 正文在 app/prompts/files/*.md，这里只选"用哪个"。
 # 切换提示词变体（灰度/租户）改这一项即可，不必改代码。
 PROMPT_CHAT_SYSTEM_ID=chat_system
+
+# ---- 雪花 ID ----
+# 机器号 0-1023。单实例填 0；多实例部署时每台必须不同，否则会生成相同 ID。
+SNOWFLAKE_WORKER_ID=0

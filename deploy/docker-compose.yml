@@ -30,7 +30,20 @@ services:
       - mysql-data:/var/lib/mysql
       # 只在数据目录为空时执行，且按文件名顺序：01-schema.sql
       - ./mysql/init:/docker-entrypoint-initdb.d:ro
-      - ./mysql/conf.d:/etc/mysql/conf.d:ro
+      # 注意挂到 conf.d-src 而不是 /etc/mysql/conf.d：
+      #   1) 直接挂 conf.d 会覆盖镜像自带的 mysql.cnf / mysqldump.cnf；
+      #   2) 更要命的是 Windows 上 bind mount 权限恒为 0777，
+      #      MySQL 见到 world-writable 的配置文件会直接忽略，且只在日志里留一行警告。
+      #      实测后果：time_zone 仍是 SYSTEM、slow_query_log 仍是 0、max_connections 仍是 151。
+      # 所以由 entrypoint 用 install 复制成 0644 再启动。
+      - ./mysql/conf.d:/etc/mysql/conf.d-src:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        install -m 0644 /etc/mysql/conf.d-src/*.cnf /etc/mysql/conf.d/
+        exec docker-entrypoint.sh mysqld
     healthcheck:
       # 不用 mysqladmin ping：它连密码错都返回 alive，等于没校验。
       # 这里跑一条真查询，把"进程活着"升级成"能认证、能查库"。
@@ -55,18 +68,22 @@ services:
     restart: unless-stopped
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD 未设置}
-    # 密码走命令行参数而不是写进 redis.conf：
-    # 配置文件是进版本库的，密码必须留在 .env 里。
-    # 命令行参数会覆盖 conf 中的同名配置。
+    # 密码与 ACL 规则都不能写在 redis.conf 里（配置文件进版本库），
+    # 也不能走命令行参数：Redis 会把命令行值整体加引号后当成一个 token，
+    # ACL 解析时用户名里就带了空格，直接报
+    # "Spaces not allowed in ACL usernames" 并拒绝启动。
+    # 所以启动时把规则渲染进临时 aclfile（只存在于容器可写层，不落卷、不进仓库）。
     #
-    # 用 ACL 而不是 --requirepass：这样能在设密码的同时摘掉危险命令
-    # （-@dangerous 覆盖 FLUSHALL / FLUSHDB / KEYS / CONFIG / DEBUG 等），
-    # 而 rename-command 在 Redis 7 已废弃，且会影响 AOF 命令回放。
-    command:
-      - redis-server
-      - /usr/local/etc/redis/redis.conf
-      - --user
-      - default on >${REDIS_PASSWORD:?REDIS_PASSWORD 未设置} ~* &* +@all -@dangerous
+    # -@dangerous 摘掉 FLUSHALL / FLUSHDB / KEYS / CONFIG / DEBUG 等命令，
+    # 比 rename-command 干净 —— 后者 Redis 7 已废弃，且会影响 AOF 命令回放。
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        printf 'user default on >%s ~* &* +@all -@dangerous\n' "$$REDIS_PASSWORD" > /tmp/users.acl
+        chmod 600 /tmp/users.acl
+        exec redis-server /usr/local/etc/redis/redis.conf --aclfile /tmp/users.acl
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:

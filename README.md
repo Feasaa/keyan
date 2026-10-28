@@ -36,8 +36,9 @@ sr/
 ├── app/                        # 应用主包（≈ 根包 com.example.demo）
 │   ├── __init__.py
 │   ├── main.py                 # 入口：应用工厂 + 生命周期 + 中间件 + 挂路由
-│   ├── core/                   # 基础设施：配置、SSE 工具（与业务无关）
+│   ├── core/                   # 基础设施：配置、ID、SSE 约定（与业务无关）
 │   │   ├── config.py           # 全局配置（≈ application.yml + @ConfigurationProperties）
+│   │   ├── snowflake.py        # 雪花 ID 生成器（时间有序、多实例不冲突）
 │   │   └── sse.py              # SSE 事件名与结束哨兵（帧编码交给 sse-starlette）
 │   ├── prompts/                # 提示词（正文是文件，不是代码常量）
 │   │   ├── files/chat_system.md  # 提示词正文 + 元数据（id / version / description）
@@ -205,11 +206,30 @@ docker compose up -d           # 首次启动会自动执行 init/01-schema.sql
 docker compose ps              # 等到两个服务都 healthy
 ```
 
-三个容易踩的点：
+四个容易踩的点：
 
+- **Windows 上 bind mount 的配置文件会被 MySQL 忽略**。挂进去的文件权限恒为 `0777`，MySQL 见到 world-writable 直接跳过，只在日志里留一行 `World-writable config file ... is ignored`，进程照常启动。后果是 `time_zone` 还是 `SYSTEM`、`slow_query_log` 还是 0、`max_connections` 还是 151——**看起来一切正常，其实配置全没生效**。所以 compose 里把配置挂到 `conf.d-src`，由 entrypoint 用 `install -m 0644` 复制到 `conf.d` 再启动。验证方法：`SELECT @@time_zone, @@slow_query_log, @@max_connections;`
+
+- **Redis 的 ACL 规则不能走命令行参数**。Redis 会把命令行值整体 `sdscatrepr` 加引号后当成一个 token，ACL 解析时用户名里就带了空格，直接报 `Spaces not allowed in ACL usernames` 并拒绝启动。所以 compose 里由 entrypoint 渲染出临时 aclfile 再用 `--aclfile` 加载。
 - **init 脚本只在数据卷为空时执行一次**。改了 `01-schema.sql` 想重来，必须 `docker compose down -v` 把卷删掉——`-v` 会连数据一起删，生产别这么干，改结构走迁移。
 - **MySQL 8.4 默认认证插件是 `caching_sha2_password`**，PyMySQL / aiomysql 需要装 `cryptography` 才能握手，否则报 `RuntimeError: 'cryptography' package is required`。8.4 已经移除了 `--default-authentication-plugin`，不要指望退回 `mysql_native_password`。
 - **雪花 ID 出接口必须转字符串**。`BIGINT` 超过 2^53，前端 `JSON.parse` 会把末几位变成 0，拿到的 ID 直接查不到记录。Pydantic 里用 `field_serializer` 或直接声明 `str`。
+
+### 雪花 ID（app/core/snowflake.py）
+
+```python
+from app.core.snowflake import get_snowflake, decompose
+
+user_id = get_snowflake().next_id()  # 进程级单例，不要每请求新建
+decompose(user_id).created_at  # 不查库就知道这条记录什么时候建的
+```
+
+位布局 `1 | 41 时间戳 | 10 机器号 | 12 序列号`，单机每毫秒 4096 个。两个约束：
+
+- **`SNOWFLAKE_WORKER_ID` 多实例必须各不相同**，否则两台机器会生成完全相同的 ID。
+- **时钟回拨超过 5ms 直接抛 `ClockMovedBackwardsError`**。宁可报错也不生成可能重复的 ID——小幅回拨（NTP 校时）会等待追上，不打断业务。
+
+纪元 `2024-01-01` 写死在代码里，不做成环境变量：能配置的东西就会被配错，而改纪元会让新旧 ID 撞车。
 
 ## 七、运行
 
