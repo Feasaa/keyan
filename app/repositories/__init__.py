@@ -1,4 +1,4 @@
-"""数据访问层（≈ Spring 的 `@Repository`）。
+"""数据访问层。
 
 这一层是**防 SQL 注入的唯一入口**，规则只有一条：
     永远不要用 f-string / % / format 把变量拼进 SQL 文本。

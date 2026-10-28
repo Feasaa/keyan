@@ -1,8 +1,7 @@
 """数据库会话：引擎、会话工厂、FastAPI 依赖。
 
 关于事务边界 —— 这里**故意不在请求结束时自动 commit**。
-    Spring 里 `@Transactional` 标在 service 方法上，边界是显式的；
-    这里同理：由 service/repository 决定什么时候提交。
+    边界由 service 显式决定：该提交的时候 commit，其余交给调用方。
     原因是流式对话要在不同时刻提交多次（每 2 秒 checkpoint 一次，
     收尾再提交终态），"请求结束统一提交"这套根本不适用。
     自动提交还会把"忘了 commit"变成"看起来成功了"，排查代价更高。

@@ -1,6 +1,6 @@
 # learn-fastapi（AI / LLM 服务骨架）
 
-FastAPI + LangChain 的分层服务骨架。分层方式刻意对齐 Spring Boot 的习惯，如果你有 Spring 基础，可以按"同一职责、不同写法"来读。
+FastAPI + LangChain 的分层服务骨架。分层跟随 FastAPI 生态的惯例：路由薄、业务进 service、SQL 只落在仓储；读代码时沿着"请求从哪进来 → 业务在哪 → 数据从哪出去"这条线走，比按目录逐个看更快。
 
 对外链路四条：**邮箱注册登录**（`/api/v1/auth`）、**LLM 对话**（`/api/v1/chat`）、**会话与消息**（`/api/v1/conversations`、`/api/v1/messages`）、**健康检查**（`/api/v1/health`）。底层铺好了雪花 ID、MySQL + Alembic 迁移、Redis、统一响应外壳、业务错误码、全局异常处理。
 
@@ -46,7 +46,7 @@ ruff check . && ruff format --check .
 
 | 文档 | 内容 |
 | --- | --- |
-| [01 架构与分层约定](docs/01-architecture.md) | 目录为什么这么分、每层的职责边界、请求流转、**Java 习惯 → Python 规范对照表** |
+| [01 架构与分层约定](docs/01-architecture.md) | 目录为什么这么分、每层的职责边界与依赖方向、请求流转、**FastAPI 里几个容易踩的点** |
 | [02 环境准备与运行](docs/02-getting-started.md) | conda、MySQL/Redis 容器、配置项、启动、测试与静态检查、四个容器踩坑点 |
 | [03 数据层](docs/03-data-layer.md) | 雪花 ID（位布局 / 时钟回拨）、ORM 与仓储的边界、Alembic 作为唯一真相源 |
 | [04 接口契约](docs/04-api-contract.md) | 统一响应外壳、错误码编码规则、异常四类通道、对话与 SSE、健康探针、提示词热更新 |
@@ -63,17 +63,18 @@ sr/
 ├── app/                     # 应用主包
 │   ├── core/                # 配置 / 错误码 / 统一响应 / 中间件 / 安全 / 雪花 ID
 │   ├── api/                 # 接口层：router.py 聚合 + deps.py 依赖 + routes/ 一资源一文件
-│   ├── schemas/             # 出入参 DTO
+│   ├── schemas/             # 出入参模型（Pydantic）
 │   ├── services/            # 业务规则（事务边界在这里）
 │   ├── repositories/        # SQL 的唯一落点
 │   ├── db/                  # ORM 模型 / 会话 / Redis / 物理类型
 │   ├── prompts/             # 提示词"怎么读"：加载、校验、热更新（正文不在这里）
-│   └── utils/               # IP 编解码、日志脱敏
+│   └── utils/               # 雪花 ID 解析、IP 编解码、日志脱敏
 ├── tests/                   # 契约测试（桩 LLM / 桩邮件，不依赖网络）
 ├── alembic/                 # 迁移脚本
 ├── deploy/                  # 容器侧配置（MySQL / Redis 的 cnf 与初始化脚本）
 ├── docs/                    # 本目录文档
 ├── prompts/                 # 提示词正文（内容资产，不进代码包）
+├── web/                     # 零构建联调页（VAPTCHA 单点 + 全链路）
 ├── docker-compose.yml       # MySQL 8.4 LTS + Redis 7.4
 ├── requirements.txt         # 运行时依赖
 ├── requirements-dev.txt     # 开发/测试依赖（-r requirements.txt）

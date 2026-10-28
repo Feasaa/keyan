@@ -126,7 +126,7 @@ ruff format --check .               # 格式检查（CI 用）
 ruff format .                       # 真正格式化
 ```
 
-测试用桩链替换 LLM 服务、用桩邮件服务截获验证码（`dependency_overrides[...]`，对应 Spring 的 `@MockBean`），不依赖外部网络，随时可跑。
+测试用桩链替换 LLM 服务、用桩邮件服务截获验证码（`app.dependency_overrides[...]`），不依赖外部网络，随时可跑。
 
 `tests/test_db_contract.py` 是**契约测试**：连真实库，把 `information_schema` 里的列类型、索引、约束名跟 `Base.metadata` 逐项比对，另外校验运行时账号确实没有 DDL 权限。库没起时自动 skip，起了就一定跑 —— 这是唯一能拦住"模型改了、迁移没生成""权限被悄悄放开"这类漂移的东西。
 
