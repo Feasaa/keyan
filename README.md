@@ -2,9 +2,11 @@
 
 FastAPI + LangChain 的分层服务骨架。分层方式刻意对齐 Spring Boot 的习惯，如果你有 Spring 基础，可以按"同一职责、不同写法"来读。
 
-对外链路三条：**邮箱注册登录**（`/api/v1/auth`）、**LLM 对话**（`/api/v1/chat`）、**健康检查**（`/api/v1/health`）。底层铺好了雪花 ID、MySQL + Alembic 迁移、Redis、统一响应外壳、业务错误码、全局异常处理。
+对外链路四条：**邮箱注册登录**（`/api/v1/auth`）、**LLM 对话**（`/api/v1/chat`）、**会话与消息**（`/api/v1/conversations`、`/api/v1/messages`）、**健康检查**（`/api/v1/health`）。底层铺好了雪花 ID、MySQL + Alembic 迁移、Redis、统一响应外壳、业务错误码、全局异常处理。
 
-鉴权是完整闭环：邮箱验证码 → 注册 → JWT access + 落库 refresh → 刷新轮换 → 登出撤销，含三层发码限流与账号枚举防护。
+对话是**有状态且必须登录**的：服务端建会话、落两条消息、按 `conversation_id` 加载上下文（请求体里没有 `history`，客户端无法指定喂给模型的上下文）；流式回答在 `done` 之前就提交；生成与连接解耦（生产者任务 + Redis Stream 分片缓冲），断线后拿 `Last-Event-ID` 调 `GET /chat/stream/{message_id}` 就能接着读，不重新生成、不重复计费，长时间没人回来才停（`interrupted`，保留已生成部分）。每条助手回复可以赞 / 踩 / 取消，写进 `messages.feedback`，消息列表直接回显。
+
+鉴权是完整闭环：VAPTCHA 人机验证 → 邮箱验证码 → 注册 → JWT access + 落库 refresh → 刷新轮换 → 登出撤销，含三层发码限流与账号枚举防护。
 
 ---
 
@@ -48,9 +50,9 @@ ruff check . && ruff format --check .
 | [02 环境准备与运行](docs/02-getting-started.md) | conda、MySQL/Redis 容器、配置项、启动、测试与静态检查、四个容器踩坑点 |
 | [03 数据层](docs/03-data-layer.md) | 雪花 ID（位布局 / 时钟回拨）、ORM 与仓储的边界、Alembic 作为唯一真相源 |
 | [04 接口契约](docs/04-api-contract.md) | 统一响应外壳、错误码编码规则、异常四类通道、对话与 SSE、健康探针、提示词热更新 |
-| [05 鉴权与安全](docs/05-auth.md) | 双令牌与轮换、邮箱验证码三层限流、**防 SQL 注入四层防线**、数据库账号 DML/DDL 分离 |
+| [05 鉴权与安全](docs/05-auth.md) | 双令牌与轮换、邮箱验证码三层限流、VAPTCHA 服务端二次验签、**防 SQL 注入四层防线**、数据库账号 DML/DDL 分离 |
 | [06 下一步](docs/06-roadmap.md) | 按难度递增的后续练习方向 |
-| [07 前端接口调用示例](docs/07-api-examples.md) | **给前端的**：TS 类型、可直接用的客户端、SSE 解析、错误码处理策略 |
+| [07 前端接口调用示例](docs/07-api-examples.md) | **给前端的**：TS 类型、可直接用的客户端、VAPTCHA 拿票与发码接入（含票一次性/过期怎么重试）、SSE 解析、错误码处理策略 |
 
 ---
 
@@ -95,6 +97,6 @@ sr/
 
 ## 状态
 
-已完成：统一返回 / 异常处理 / 错误码 / 表结构 + Alembic / 仓储层 / 雪花 ID / 注册登录鉴权 / SSE 对话。
+已完成：统一返回 / 异常处理 / 错误码 / 表结构 + Alembic / 仓储层 / 雪花 ID / 注册登录鉴权（含 VAPTCHA 人机验证）/ 有状态对话（强制登录 + 落库 + 服务端上下文）/ SSE 断线续传 / 会话列表与历史 / 消息评价 / 就绪探针查 DB+Redis。
 
-未做：对话接口挂鉴权、流式落库、就绪探针查 DB+Redis、登录失败计数、忘记密码、人机验证、RAG —— 见 [06 下一步](docs/06-roadmap.md)。
+未做：会话搜索、重新生成回答、忘记密码、RAG、评价数据回灌 —— 见 [06 下一步](docs/06-roadmap.md)。

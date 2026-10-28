@@ -55,7 +55,7 @@ alembic upgrade head           # 建表（表结构由 Alembic 管理，不在�
 alembic check                  # 应输出 No new upgrade operations detected
 ```
 
-四个容易踩的点：
+几个容易踩的点：
 
 - **Windows 上 bind mount 的配置文件会被 MySQL 忽略**。挂进去的文件权限恒为 `0777`，MySQL 见到 world-writable 直接跳过，只在日志里留一行 `World-writable config file ... is ignored`，进程照常启动。后果是 `time_zone` 还是 `SYSTEM`、`slow_query_log` 还是 0、`max_connections` 还是 151——**看起来一切正常，其实配置全没生效**。所以 compose 里把配置挂到 `conf.d-src`，由 entrypoint 用 `install -m 0644` 复制到 `conf.d` 再启动。验证方法：`SELECT @@time_zone, @@slow_query_log, @@max_connections;`
 
@@ -63,6 +63,8 @@ alembic check                  # 应输出 No new upgrade operations detected
 - **表结构只由 Alembic 管，容器启动时不再建表**。之前 `docker-entrypoint-initdb.d` 里放了一份 DDL，结果和模型在注释、索引上大面积漂移，`schema_migrations` 还和 `alembic_version` 打架。删掉重复定义后，`alembic check` 才能作为"模型和库是否一致"的守门员。想从零重来：`docker compose down -v` 后重新 `up -d` + `alembic upgrade head`（`-v` 会连数据一起删）。
 - **MySQL 8.4 默认认证插件是 `caching_sha2_password`**，PyMySQL / aiomysql 需要装 `cryptography` 才能握手，否则报 `RuntimeError: 'cryptography' package is required`。8.4 已经移除了 `--default-authentication-plugin`，不要指望退回 `mysql_native_password`。
 - **雪花 ID 出接口必须转字符串**。`BIGINT` 超过 2^53，前端 `JSON.parse` 会把末几位变成 0，拿到的 ID 直接查不到记录。Pydantic 里用 `field_serializer` 或直接声明 `str`。
+- **PyMySQL 必须钉 `<1.2`**。1.2 起把 `converters.escape_bytes_prefixed` 换成了字符串占位符（值就是 `"DO NOT IMPORT THIS!!!"`），唯一目的是让 aiomysql 的 `from ... import` 不报 ImportError；而 aiomysql 0.3.2 仍然把它当函数调用，于是**任何带 bytes 参数的 SQL 都会炸**：`TypeError: 'str' object is not callable`。本项目 `User.last_login_ip` / `AuthSession.ip` 是 `BinaryIP`（bytes），所以注册走到签发 token 那步必然 500 —— 而且只在真连 MySQL 时现形，用 SQLite 跑的 200 多条单测全绿也发现不了。
+  `app/db/session.py` 的 `_patch_aiomysql_escape()` 会在建引擎前把名字换回可调用的 `escape_bytes` 兜底，`tests/test_mysql_driver.py` 造了"坏版本"状态验证这个补丁。但依赖侧仍然要钉版本，别指望补丁帮你兜一辈子。
 
 ## 配置项（.env）
 

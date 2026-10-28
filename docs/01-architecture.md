@@ -196,8 +196,8 @@ Spring 加了 `@RestController` 就被扫描到；FastAPI 必须在 `app/api/rou
 ### 3. 参数校验靠类型，不靠注解
 
 ```python
-message: str = Field(min_length=1)  # ≈ @NotBlank
-history: list[ChatMessage] = Field(default_factory=list)  # ≈ @Size(max=20)
+message: str = Field(min_length=1, max_length=8000)  # ≈ @NotBlank + @Size(max=8000)
+title: str = Field(min_length=1, max_length=100)  # ≈ @Size(min=1, max=100)
 ```
 
 Spring 要写 `@GetMapping @PathVariable @Valid @RequestBody @Operation @ApiResponse` 一堆注解；FastAPI 用 Python 原生类型标注一次表达完，文档自动生成。

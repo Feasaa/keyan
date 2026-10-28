@@ -44,6 +44,20 @@ async def create_message(session: AsyncSession, **kwargs) -> Message:
 | `get_session` 不自动提交 | 流式对话要分多次提交，统一提交语义对不上；且"忘写 commit"会变成"看起来成功了" |
 | `expire_on_commit=False` | commit 后属性过期，再访问触发同步 IO，在 async 里直接炸 |
 
+### 会话与消息的写入约定
+
+三个约束不是"建议"，是踩过之后才加的：
+
+| 约定 | 不这么做会怎样 |
+| --- | --- |
+| 顺序按 `seq`，不按 `created_at` | 同一毫秒可能插入两条，时间戳排序结果不确定，翻页会跳行或重复 |
+| 分配 `seq` 前先锁会话行（`SELECT ... FOR UPDATE`） | 同一会话并发插入会算出同一个 `MAX(seq)+1`，撞 `uk_msg_conv_seq` 直接 500 |
+| 对话数据外键 `RESTRICT`，登录会话 `CASCADE` | 删用户要连带删登录态是预期；但删会话**不能**级联删消息 —— 对话内容是排查"模型答歪"的唯一证据 |
+
+评价落在 `messages` 的三列上（`feedback` 0 未评价 / 1 赞 / 2 踩、`feedback_reason`、`feedback_at`），没单开表：一条消息只有一个评价，而历史消息列表要回显"这条赞过没"，独立表意味着每页多一次 JOIN 或 IN 查询。代价是**没有评价历史**（用户改主意会覆盖旧值），真需要审计时再加事件表。
+
+`idx_msg_feedback (feedback, feedback_at)` 是给"把所有差评捞出来做 badcase 集"准备的，别在没有这个索引的表上跑 `WHERE feedback=2`。
+
 `tests/test_db_contract.py` 会连真实库比对 `information_schema`：表、列、物理类型、索引、约束名逐项核对。**它当场抓到过 6 处漂移**——三个 `deleted_at` 漏了 `DATETIME(3)`、两个累计 token 写成了 `INT` 而库里是 `BIGINT`、`refresh_token_hash` 模型写 `VARCHAR` 库里是 `CHAR`。这类不一致单测看不出来，只会在上线后炸。
 
 数据库没起时这些测试自动 skip，不会阻塞本地跑单测。
