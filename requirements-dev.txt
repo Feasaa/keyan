@@ -1,0 +1,10 @@
+# 开发 / 测试依赖：本地与 CI 用这一份，它会带上全部运行时依赖。
+#   安装：pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+pytest>=8.0
+# 测试里用 httpx 的 AsyncClient 直连 ASGI app（不起真实端口）
+httpx>=0.27
+# 代码检查 / 格式化，配置在 pyproject.toml 的 [tool.ruff]
+ruff>=0.12

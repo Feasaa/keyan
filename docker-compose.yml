@@ -1,12 +1,21 @@
 # 本地依赖编排：MySQL 8.4 LTS + Redis 7
 #
-# 用法（在 deploy/ 目录下）：
+# 用法（在**仓库根目录**执行，和 app 共用同一个 .env）：
 #   cp .env.example .env      # 改掉里面的密码
-#   docker compose up -d      # 首次启动会自动执行 mysql/init/*.sql
+#   docker compose up -d      # 首次启动会自动执行 deploy/mysql/initdb/*.sh
 #   docker compose ps         # 等两个服务都变成 healthy
 #
+# 为什么这个文件在根目录而不是 deploy/：
+#   docker compose 只会自动读取"compose 文件同级目录"的 .env 做变量插值。
+#   放在根目录 = 与 app/core/config.py 读的是同一个文件，密码只存在一份。
+#   曾经 deploy/.env 与根 .env 各存一份 DB_PASSWORD，改密码必须两边同步，
+#   漏一边就是"本地能跑、compose 起不来"或反过来的经典事故。
+#
+# 变量命名统一用应用侧的名字（DB_* / REDIS_*），compose 自己需要的镜像变量
+# （MYSQL_USER 等）在下面做一次映射，不再引入第二套变量。
+#
 # 只绑定 127.0.0.1：数据库和缓存不应暴露到局域网，容器之间走内网服务名。
-# 端口冲突时改 .env 里的 MYSQL_PORT / REDIS_PORT，不要改容器内端口。
+# 端口冲突时改 .env 里的 DB_PORT / REDIS_PORT，不要改容器内端口。
 
 name: agent-chat
 
@@ -19,17 +28,18 @@ services:
       # 库名固定，不开放配置：init 脚本里写死了 USE agent_chat，
       # 允许改名会立刻造成两边不一致。
       MYSQL_DATABASE: agent_chat
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD 未设置，请先复制 .env.example 为 .env}
-      MYSQL_USER: ${MYSQL_USER:-app}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?MYSQL_PASSWORD 未设置}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD 未设置：请在仓库根目录复制 .env.example 为 .env}
+      # 映射到应用侧同名配置项，密码只在 .env 里写一次。
+      MYSQL_USER: ${DB_USER:-app}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD 未设置：请在仓库根目录复制 .env.example 为 .env}
       # 迁移专用账号：拥有 DDL，只在 alembic 里用。
-      # 运行时账号（MYSQL_USER）会被收权成只有 DML，见 mysql/initdb/10-grants.sh。
+      # 运行时账号（MYSQL_USER）会被收权成只有 DML，见 deploy/mysql/initdb/10-grants.sh。
       # 留空 = 不收权（本地图省事），生产必须配。
-      MYSQL_MIGRATOR_USER: ${MYSQL_MIGRATOR_USER:-migrator}
-      MYSQL_MIGRATOR_PASSWORD: ${MYSQL_MIGRATOR_PASSWORD:-}
+      MYSQL_MIGRATOR_USER: ${DB_MIGRATION_USER:-migrator}
+      MYSQL_MIGRATOR_PASSWORD: ${DB_MIGRATION_PASSWORD:-}
       TZ: UTC
     ports:
-      - "127.0.0.1:${MYSQL_PORT:-3306}:3306"
+      - "127.0.0.1:${DB_PORT:-3306}:3306"
     volumes:
       # 命名卷：数据在卷里，容器可随时重建。删数据请显式 docker compose down -v
       - mysql-data:/var/lib/mysql
@@ -38,14 +48,14 @@ services:
       # 而且 alembic_version 和自建的 schema_migrations 会互相打架。
       # 建表请执行：alembic upgrade head
       # 注意 initdb 只在数据目录为空时执行一次，已有数据的库要手动跑一次。
-      - ./mysql/initdb:/docker-entrypoint-initdb.d:ro
+      - ./deploy/mysql/initdb:/docker-entrypoint-initdb.d:ro
       # 注意挂到 conf.d-src 而不是 /etc/mysql/conf.d：
       #   1) 直接挂 conf.d 会覆盖镜像自带的 mysql.cnf / mysqldump.cnf；
       #   2) 更要命的是 Windows 上 bind mount 权限恒为 0777，
       #      MySQL 见到 world-writable 的配置文件会直接忽略，且只在日志里留一行警告。
       #      实测后果：time_zone 仍是 SYSTEM、slow_query_log 仍是 0、max_connections 仍是 151。
       # 所以由 entrypoint 用 install 复制成 0644 再启动。
-      - ./mysql/conf.d:/etc/mysql/conf.d-src:ro
+      - ./deploy/mysql/conf.d:/etc/mysql/conf.d-src:ro
     entrypoint:
       - /bin/sh
       - -c
@@ -97,7 +107,7 @@ services:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
-      - ./redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+      - ./deploy/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
     healthcheck:
       test:
         - CMD-SHELL

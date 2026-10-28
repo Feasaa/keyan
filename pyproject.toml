@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "FastAPI 学习项目骨架"
 requires-python = ">=3.11"
 
-# 依赖统一维护在 environment.yml / requirements.txt
+# 依赖声明在 requirements.txt（运行时）与 requirements-dev.txt（开发/测试）。
+# environment.yml 只声明解释器并用 -r 引用它们，不重复版本。
+# 这里不写 [project.dependencies]：本项目是应用而非要发布到 PyPI 的库，
+# 两处声明只会造成漂移。
 
 [tool.pytest.ini_options]
 # 让 pytest 从项目根目录导入 app 包
