@@ -30,7 +30,11 @@ dependencies:
       - sqlalchemy[asyncio]>=2.0
       - aiomysql>=0.2
       - cryptography>=42
+      - alembic>=1.13
 
       # 测试
       - pytest>=8.0
       - httpx>=0.27
+
+      # 代码检查 / 格式化，配置在 pyproject.toml 的 [tool.ruff]
+      - ruff>=0.12

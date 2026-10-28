@@ -76,5 +76,5 @@ class StreamMeta(BaseModel):
 class StreamError(BaseModel):
     """SSE 错误帧：event=error。流已开始后无法再改 HTTP 状态码，只能靠事件传递。"""
 
-    code: int = Field(..., description="等价 HTTP 状态码", examples=[502])
+    code: int = Field(..., description="业务错误码，与 JSON 接口同一套", examples=[22502])
     message: str = Field(..., description="中性错误摘要")

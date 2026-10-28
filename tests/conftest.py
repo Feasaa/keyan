@@ -8,12 +8,11 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage, AIMessageChunk
-
 from app.core.config import get_settings
 from app.main import app
 from app.services.llm_service import LLMService, get_llm_service
+from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage, AIMessageChunk
 
 
 class StubChain:

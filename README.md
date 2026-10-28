@@ -2,7 +2,7 @@
 
 FastAPI + LangChain 的分层服务骨架。分层方式刻意对齐 Spring Boot 的习惯，如果你有 Spring 基础，可以按"同一职责、不同写法"来读。
 
-当前只保留 **LLM 对话** 与 **健康检查** 两条链路：没有数据库、没有业务 CRUD，专注 AI 能力的接入方式。
+当前对外链路还是 **LLM 对话** 与 **健康检查** 两条，但底层基础设施已经铺好：雪花 ID、MySQL 表结构 + Alembic 迁移、统一响应外壳、业务错误码、全局异常处理。业务 CRUD（仓库层 / 服务层）还没接上，见[下一步](#十下一步可以练什么)。
 
 ---
 
@@ -20,7 +20,13 @@ FastAPI + LangChain 的分层服务骨架。分层方式刻意对齐 Spring Boot
 | `@Bean` / `@Configuration` | `app/core/`、各 service 的 `get_xxx_service()` | 基础设施装配 |
 | `application.yml` + `@ConfigurationProperties` | `app/core/config.py` + `.env` | 配置管理 |
 | `Filter` / `HandlerInterceptor` | `app/main.py` 里的 `add_middleware(...)` | 横切关注点 |
-| `@ControllerAdvice` + `@ExceptionHandler` | endpoint 内的 `try/except` + `HTTPException` | 统一异常映射 |
+| `@ControllerAdvice` + `@ExceptionHandler` | `app/core/exception_handlers.py` 的 `register_exception_handlers` | 统一异常映射 |
+| 统一返回体 `Result<T>` | `app/core/response.py` 的 `ApiResponse[T]` | `{code, message, data, trace_id}` 外壳 |
+| 错误码枚举（`ErrorCode.NOT_FOUND`） | `app/core/errors.py` 的 `ErrorCode(ErrorSpec)` | 业务码 + HTTP 状态 + 默认文案 |
+| `MDC.put("traceId", ...)` + `Filter` | `app/core/context.py` 的 `ContextVar` + 纯 ASGI 中间件 | 请求级链路 ID |
+| JPA `@Entity` / `@Table` | `app/db/models.py` 的 `Mapped[...]` | 表模型 |
+| Flyway / Liquibase（不用 `ddl-auto`） | `alembic/versions/` | 表结构变更（本项目禁用 `create_all`） |
+| `@Repository` | `app/db/session.py` 的 `get_session`（仓库层待建） | 数据访问 |
 | springdoc（Swagger UI） | 内置 `/docs`（Swagger）、`/redoc` | 接口文档 |
 | `pom.xml` / `build.gradle` | `pyproject.toml` + `requirements.txt` / `environment.yml` | 依赖与构建 |
 | `src/test/java` + `@SpringBootTest` + `MockMvc` | `tests/` + `TestClient` | 测试 |
@@ -36,8 +42,13 @@ sr/
 ├── app/                        # 应用主包（≈ 根包 com.example.demo）
 │   ├── __init__.py
 │   ├── main.py                 # 入口：应用工厂 + 生命周期 + 中间件 + 挂路由
-│   ├── core/                   # 基础设施：配置、ID、SSE 约定（与业务无关）
+│   ├── core/                   # 基础设施：配置、ID、错误码、统一响应（与业务无关）
 │   │   ├── config.py           # 全局配置（≈ application.yml + @ConfigurationProperties）
+│   │   ├── errors.py           # 错误码表 + AppError（≈ 错误码枚举 + 业务异常基类）
+│   │   ├── response.py         # 统一响应外壳 ApiResponse[T]
+│   │   ├── context.py          # 请求级 ContextVar（trace_id）
+│   │   ├── middleware.py       # trace_id 中间件（纯 ASGI，不缓冲 SSE）
+│   │   ├── exception_handlers.py  # 四类异常的集中翻译（≈ @ControllerAdvice）
 │   │   ├── snowflake.py        # 雪花 ID 生成器（时间有序、多实例不冲突）
 │   │   └── sse.py              # SSE 事件名与结束哨兵（帧编码交给 sse-starlette）
 │   ├── prompts/                # 提示词（正文是文件，不是代码常量）
@@ -47,7 +58,7 @@ sr/
 │   ├── db/                     # 数据访问层（≈ repository + entity）
 │   │   ├── base.py             # ORM 基类 + 约束命名约定 + utcnow
 │   │   ├── enums.py            # 状态枚举，与 CHECK 约束一一对应
-│   │   ├── models.py           # 4 张表的模型，镜像 init/01-schema.sql
+│   │   ├── models.py           # 4 张表的模型，与 alembic/versions 保持一致
 │   │   ├── session.py          # 引擎 / 会话工厂 / get_session 依赖
 │   │   └── types.py            # MySQL 物理类型（UNSIGNED / MEDIUMTEXT / DATETIME(3)）
 │   ├── api/                    # 接口层（FastAPI 惯例）
@@ -65,15 +76,21 @@ sr/
 │   └── utils/                  # 通用工具（≈ common/util 包，当前为空）
 ├── tests/                      # 测试（≈ src/test/java）
 │   ├── conftest.py             # TestClient + LLM 桩夹具
-│   ├── test_health.py
-│   ├── test_chat.py
-│   └── test_prompts.py
+│   ├── test_health.py          # 探针 + 统一响应外壳
+│   ├── test_chat.py            # 一次性 / 流式对话
+│   ├── test_prompts.py         # 提示词加载与热更新
+│   ├── test_errors.py          # 错误码编码规则 + 四类异常路径
+│   ├── test_snowflake.py       # 并发唯一性 + 位布局 + 时钟回拨
+│   ├── test_models.py          # 纯 metadata 断言（物理类型 / 约束名）
+│   └── test_db_contract.py     # 连真库比对 information_schema（无库自动 skip）
+├── alembic/                    # 数据库迁移（表结构的唯一真相源）
+│   ├── env.py                  # 复用 app 的配置与模型，DSN 不写进 ini
+│   ├── script.py.mako          # 迁移模板（已改成项目风格，生成即过 ruff）
+│   └── versions/               # 迁移脚本，只依赖 sqlalchemy，不 import 应用代码
 ├── deploy/                     # 本地依赖编排（Docker，不参与应用打包）
 │   ├── docker-compose.yml      # MySQL 8.4 LTS + Redis 7.4
 │   ├── .env.example            # 复制成 deploy/.env 后填密码
-│   ├── mysql/
-│   │   ├── conf.d/01-server.cnf  # 字符集 / 时区 / 慢查询 / sql_mode
-│   │   └── init/01-schema.sql    # 首次启动自动建表
+│   ├── mysql/conf.d/01-server.cnf  # 字符集 / 时区 / 慢查询 / sql_mode
 │   └── redis/redis.conf        # AOF / volatile-lru / ACL 收权
 ├── environment.yml             # conda 环境定义
 ├── requirements.txt            # pip 依赖
@@ -96,7 +113,7 @@ sr/
 
 **`app/schemas/`** — 出入参契约。独立于任何存储结构：接口返回常常是拼装结果，且内部字段（密钥、审计字段）绝不能返回给前端。对应 Spring 的 DTO/VO 分层。
 
-**`app/services/`** — 业务规则的唯一归宿：可复用、可单测（不依赖 HTTP）、隔离框架（换 Web 框架不用重写业务）。LLM 的链构建、降级、超时重试全部收敛在这里，接口层只做状态码翻译。对应 `@Service`。
+**`app/services/`** — 业务规则的唯一归宿：可复用、可单测（不依赖 HTTP）、隔离框架（换 Web 框架不用重写业务）。LLM 的链构建、降级、超时重试全部收敛在这里，接口层只做协议适配。对应 `@Service`。
 
 **`tests/`** — 测试锁住的是**接口契约**而不是实现。LLM 用桩链替换，不花钱、不依赖网络、结果可断言。
 
@@ -151,7 +168,9 @@ Spring 要写 `@GetMapping @PathVariable @Valid @RequestBody @Operation @ApiResp
 
 ### 4. 异常处理
 
-service 层**不抛 HTTP 异常**，只抛业务异常（`LLMNotConfiguredError` / `LLMUpstreamError`）；由接口层翻译成 `503` / `502`。原因：service 不该知道 HTTP 语义，否则换框架就要重写业务。这对应 Spring 里"Service 抛业务异常，由 `@ControllerAdvice` 统一映射成状态码"的分工。
+service 层**不抛 HTTP 异常**，只抛 `AppError` 子类（带业务错误码，如 `LLMNotConfiguredError` / `LLMUpstreamError`）；由 `exception_handlers.py` 统一翻译成状态码 + 统一响应体。原因：service 不该知道 HTTP 语义，否则换框架就要重写业务。这对应 Spring 里"Service 抛业务异常，由 `@ControllerAdvice` 统一映射成状态码"的分工，区别是 Python 侧**不需要在路由上写 `try/except`**，全局兜住。
+
+细节见[统一响应结构](#统一响应结构)和[异常怎么走](#异常怎么走)。
 
 ### 5. Java 习惯 → Python 规范（迁移对照）
 
@@ -198,18 +217,23 @@ pip install -r requirements.txt
 deploy/
 ├── docker-compose.yml        # MySQL 8.4 LTS + Redis 7.4
 ├── .env.example              # 复制成 .env，改密码
-├── mysql/
-│   ├── conf.d/01-server.cnf  # 字符集 / 时区 / 慢查询 / sql_mode
-│   └── init/01-schema.sql    # 首次启动自动建表
-└── redis/
-    └── redis.conf            # AOF + volatile-lru + ACL 收权
+├── mysql/conf.d/01-server.cnf  # 字符集 / 时区 / 慢查询 / sql_mode
+└── redis/redis.conf          # AOF + volatile-lru + ACL 收权
+
+alembic/
+├── env.py                    # 复用 app 的配置与模型
+└── versions/                 # 迁移脚本
 ```
 
 ```powershell
 cd D:\workspace\python\sr\deploy
 cp .env.example .env           # 改掉里面的三个密码
-docker compose up -d           # 首次启动会自动执行 init/01-schema.sql
+docker compose up -d           # 只起容器，此时库里是空的
 docker compose ps              # 等到两个服务都 healthy
+
+cd D:\workspace\python\sr
+alembic upgrade head           # 建表（表结构由 Alembic 管理，不在容器启动时建）
+alembic check                  # 应输出 No new upgrade operations detected
 ```
 
 四个容易踩的点：
@@ -217,7 +241,7 @@ docker compose ps              # 等到两个服务都 healthy
 - **Windows 上 bind mount 的配置文件会被 MySQL 忽略**。挂进去的文件权限恒为 `0777`，MySQL 见到 world-writable 直接跳过，只在日志里留一行 `World-writable config file ... is ignored`，进程照常启动。后果是 `time_zone` 还是 `SYSTEM`、`slow_query_log` 还是 0、`max_connections` 还是 151——**看起来一切正常，其实配置全没生效**。所以 compose 里把配置挂到 `conf.d-src`，由 entrypoint 用 `install -m 0644` 复制到 `conf.d` 再启动。验证方法：`SELECT @@time_zone, @@slow_query_log, @@max_connections;`
 
 - **Redis 的 ACL 规则不能走命令行参数**。Redis 会把命令行值整体 `sdscatrepr` 加引号后当成一个 token，ACL 解析时用户名里就带了空格，直接报 `Spaces not allowed in ACL usernames` 并拒绝启动。所以 compose 里由 entrypoint 渲染出临时 aclfile 再用 `--aclfile` 加载。
-- **init 脚本只在数据卷为空时执行一次**。改了 `01-schema.sql` 想重来，必须 `docker compose down -v` 把卷删掉——`-v` 会连数据一起删，生产别这么干，改结构走迁移。
+- **表结构只由 Alembic 管，容器启动时不再建表**。之前 `docker-entrypoint-initdb.d` 里放了一份 DDL，结果和模型在注释、索引上大面积漂移，`schema_migrations` 还和 `alembic_version` 打架。删掉重复定义后，`alembic check` 才能作为"模型和库是否一致"的守门员。想从零重来：`docker compose down -v` 后重新 `up -d` + `alembic upgrade head`（`-v` 会连数据一起删）。
 - **MySQL 8.4 默认认证插件是 `caching_sha2_password`**，PyMySQL / aiomysql 需要装 `cryptography` 才能握手，否则报 `RuntimeError: 'cryptography' package is required`。8.4 已经移除了 `--default-authentication-plugin`，不要指望退回 `mysql_native_password`。
 - **雪花 ID 出接口必须转字符串**。`BIGINT` 超过 2^53，前端 `JSON.parse` 会把末几位变成 0，拿到的 ID 直接查不到记录。Pydantic 里用 `field_serializer` 或直接声明 `str`。
 
@@ -254,7 +278,7 @@ async def create_message(session: AsyncSession, **kwargs) -> Message:
 
 | 决定 | 不这么做会怎样 |
 | --- | --- |
-| 表结构由 `init/01-schema.sql` 管，不用 `create_all()` | 应用启动时偷偷建表，改结构没人知道，迁移无从谈起 |
+| 表结构由 Alembic 管，不用 `create_all()` | 应用启动时偷偷建表，改结构没人知道，迁移无从谈起 |
 | 关系全部 `lazy="raise"` | 异步里惰性加载抛 `MissingGreenlet`，报错栈完全看不出哪行触发 |
 | `get_session` 不自动提交 | 流式对话要分多次提交，统一提交语义对不上；且"忘写 commit"会变成"看起来成功了" |
 | `expire_on_commit=False` | commit 后属性过期，再访问触发同步 IO，在 async 里直接炸 |
@@ -262,6 +286,30 @@ async def create_message(session: AsyncSession, **kwargs) -> Message:
 `tests/test_db_contract.py` 会连真实库比对 `information_schema`：表、列、物理类型、索引、约束名逐项核对。**它当场抓到过 6 处漂移**——三个 `deleted_at` 漏了 `DATETIME(3)`、两个累计 token 写成了 `INT` 而库里是 `BIGINT`、`refresh_token_hash` 模型写 `VARCHAR` 库里是 `CHAR`。这类不一致单测看不出来，只会在上线后炸。
 
 数据库没起时这些测试自动 skip，不会阻塞本地跑单测。
+
+### 迁移（alembic/）
+
+表结构**只由 Alembic 定义**。`deploy` 的容器启动时不再建表 —— 两处都写 DDL 必然漂移，实测就在列注释和表达式索引上对不上。
+
+```powershell
+alembic revision --autogenerate -m "add xxx"   # 改完模型后生成迁移，务必人工过一遍
+alembic upgrade head                            # 应用
+alembic downgrade -1                            # 回滚一步
+alembic current                                 # 当前版本
+alembic check                                   # 模型与库有无差异，CI 里跑这个
+```
+
+三个容易踩的地方：
+
+1. **`alembic.ini` 必须保持纯 ASCII**。configparser 用系统 locale 编码读它，Windows 上是 GBK，写中文注释会直接 `UnicodeDecodeError`，报错还指向 `alembic/config.py`，跟注释毫无关系。
+2. **迁移文件不能 import 应用代码**。自定义 `TypeDecorator` 默认会被渲染成 `app.db.types.IntEnumValue()`，模型一改名历史迁移就跑不起来。`env.py` 里的 `render_item` 把它退化成物理类型（`TINYINT UNSIGNED` / `VARCHAR`）。
+3. **表达式索引比不了**。`idx_conv_user_recent` 建在 `(user_id, last_message_at DESC)` 上，DESC 是表达式不是列，Alembic 只能生成"近似签名"，每次 check 都误报。已在 `include_object` 里排除，代价是这个索引的变更要手写迁移。
+
+另外两处工程细节：
+
+- `script.py.mako` 已改成本项目的风格（`str | Sequence[str] | None`、import 排序），这样 `alembic revision` 生成出来的文件直接过 `ruff`，不用每次手动修。
+- `alembic/versions/*.py` 在 `pyproject.toml` 里只放行了 `F401`（空迁移必然带入未使用的 `sa` / `op`）和 `I001`（模板占位符为空时多一个空行）两条规则，其余检查照常生效。
+
 
 ## 七、运行
 
@@ -290,17 +338,81 @@ uvicorn app.main:app --reload --port 8000
 > 若 8000 被旧进程占用（报 `[Errno 10048]`），先找到并停掉：
 > `Get-NetTCPConnection -LocalPort 8000 -State Listen` → `Stop-Process -Id <PID>`。
 
-## 八、测试
+## 八、测试与静态检查
 
 ```powershell
 conda activate fastapi-learn
 cd D:\workspace\python\sr
-pytest
+
+pytest                              # 全部用例
+ruff check .                        # 静态检查
+ruff format --check .               # 格式检查（CI 用）
+ruff format .                       # 真正格式化
 ```
 
 测试用桩链替换 LLM 服务（`dependency_overrides[get_llm_service]`，对应 Spring 的 `@MockBean`），不依赖外部网络，随时可跑。
 
+`tests/test_db_contract.py` 是**契约测试**：连真实库，把 `information_schema` 里的列类型、索引、约束名跟 `Base.metadata` 逐项比对。库没起时自动 skip，起了就一定跑 —— 这是唯一能拦住"模型改了、迁移没生成"这类漂移的东西。
+
 ## 九、接口契约
+
+### 统一响应结构
+
+所有 JSON 接口（含健康检查）都是同一个外壳：
+
+```json
+{"code": 0, "message": "ok", "data": {"status": "ok", "version": "0.1.0"}, "trace_id": "9f2c..."}
+{"code": 22502, "message": "LLM 上游服务异常：RuntimeError", "data": null, "trace_id": "9f2c..."}
+```
+
+**HTTP 状态码仍然是真实的**（502 就是 502），不是"一律 200、错误码放 body"。三个理由：
+
+1. 网关、监控、告警、日志采集都按状态码统计错误率，全 200 会让现成的可观测性工具全部失效；
+2. 浏览器、CDN、重试中间件依赖状态码语义；
+3. SSE 是事件流，套不了 envelope —— 两套语义并存只会更乱。
+
+所以分工是：**状态码表达协议层结果，`code` 表达业务原因**。
+
+`trace_id` 每个请求一个，回写到响应头 `X-Request-ID`。客户端带了就沿用，便于前端/网关串起同一条链路。
+
+### 错误码
+
+5 位十进制：`X M SSS`
+
+| 位 | 含义 |
+| --- | --- |
+| `X` | 错误归属：`1` 调用方问题，`2` 服务端/依赖问题 |
+| `M` | 模块：`0` 通用，`1` 鉴权，`2` 对话，`3` 数据 |
+| `SSS` | HTTP 状态码 |
+
+把状态码编进错误码，是为了排障时一眼看懂：`22502` = 对话模块、服务端问题、上游 502，不用翻对照表。前端也能只看首位决定"该提示用户还是该重试"。
+
+| code | HTTP | 含义 |
+| --- | --- | --- |
+| `0` | 200 | 成功 |
+| `10400` | 400 | 请求参数不合法 |
+| `10404` | 404 | 资源不存在 |
+| `10405` | 405 | 请求方法不支持 |
+| `10422` | 422 | 参数校验失败（`data.errors` 里逐字段说明） |
+| `10429` | 429 | 请求过于频繁 |
+| `10500` | 500 | 服务内部异常 |
+| `11401` / `11403` | 401 / 403 | 未登录 / 无权限 |
+| `22502` | 502 | LLM 上游异常 |
+| `22503` | 503 | LLM 未配置 |
+| `22504` | 504 | LLM 上游超时 |
+
+### 异常怎么走
+
+| 异常 | 谁接 | 结果 |
+| --- | --- | --- |
+| `AppError` 子类 | `handle_app_error` | 状态码与文案由错误码决定，不记堆栈 |
+| `RequestValidationError` | `handle_validation_error` | 422 + 逐字段错误 |
+| `HTTPException`（框架抛的 404/405） | `handle_http_exception` | 按状态码映射业务码 |
+| 其他 `Exception` | `handle_unexpected_error` | 500 + 堆栈进日志，**响应里绝不带原文** |
+
+所以业务代码里不写 `HTTPException`，直接抛 `LLMUpstreamError(...)` 之类即可 —— 路由层看不到一个状态码。
+
+**兜底 handler 必须存在**：没有它，未预期异常会走 Starlette 默认的纯文本 500，既不是统一结构，DEBUG 模式下还会把堆栈直接返回给客户端。
 
 ### 对话（/api/v1/chat，LangChain LCEL 链）
 
@@ -317,7 +429,7 @@ pytest
 | `delta` | `{"delta":"增量文本"}` | 模型增量输出，客户端顺序拼接即得完整回答 |
 | `meta` | `{"model":"...","prompt_tokens":157,"completion_tokens":4}` | 结束前给出实际模型与用量 |
 | `done` | `[DONE]` | 结束哨兵，收到后停止读取 |
-| `error` | `{"code":502,"message":"..."}` | 流中途失败。此时响应头已发出，只能靠事件传错误 |
+| `error` | `{"code":22502,"message":"..."}` | 流中途失败。此时响应头已发出，只能靠事件传错误 |
 | 注释行 | `: ping - <时间>` | 心跳，空闲超过 `SSE_PING_SECONDS` 时发出，客户端忽略 |
 
 实测报文：
@@ -369,7 +481,7 @@ FastAPI / Starlette 内置只有通用的 `StreamingResponse`，**没有 SSE 语
 三个容易踩的细节：
 
 1. **dict 必须用 `JSONServerSentEvent`**：普通的 `ServerSentEvent` 对 dict 走 `str()`，会产出 `data: {'code': 502}` 这种单引号 Python repr，客户端 `JSON.parse` 直接失败。这个坑只有把报文打出来看才会发现。
-2. **错误有两个通道**：配置缺失这类前置条件在响应头下发前抛 `HTTPException`，客户端拿到真实的 503；而流开始后的上游故障只能发 `event=error`，此时 HTTP 状态码已经是 200，改不了。
+2. **错误有两个通道**：配置缺失这类前置条件在响应头下发前抛 `AppError`，客户端拿到真实的 503；而流开始后的上游故障只能发 `event=error`，此时 HTTP 状态码已经是 200，改不了。
 3. **停机要能收尾**：`main.py` 的 lifespan 在关闭时 `set()` 一个 `anyio.Event` 并传给 `EventSourceResponse`，在途的流会收到通知后主动结束，而不是被进程退出硬切断——否则客户端只看到连接莫名断开。
 
 ### 健康检查（/api/v1/health）
@@ -390,7 +502,7 @@ FastAPI / Starlette 内置只有通用的 `StreamingResponse`，**没有 SSE 语
 ```powershell
 # 未配置密钥时
 curl.exe http://127.0.0.1:8000/api/v1/chat/status
-# {"configured":false,...,"prompt_id":"chat_system","prompt_version":1}
+# {"code":0,"message":"ok","data":{"configured":false,...,"prompt_id":"chat_system"},"trace_id":"..."}
 
 # 流式对话（-N 关闭 curl 自身缓冲，才能看到逐块输出）
 curl.exe -N -X POST http://127.0.0.1:8000/api/v1/chat/stream -H "Content-Type: application/json" -d "{\"message\":\"你好\"}"
@@ -457,11 +569,13 @@ curl.exe http://127.0.0.1:8000/api/v1/chat/status
 
 ## 十、下一步可以练什么
 
-按由易到难：
+按由易到难（统一返回、异常处理、错误码、表结构、迁移已经做完了，下面接在后面）：
 
 1. **SSE 断线续传**：给每帧带 `id:`，客户端重连时用 `Last-Event-ID` 续传，对应 SSE 规范里的重连语义。
 2. **LLM 结构化输出**：`.with_structured_output(PydanticModel)` 替换 `StrOutputParser`，做实体抽取。
-3. **加会话记忆**：用 `RunnableWithMessageHistory` 或外部存储，把 history 从请求体搬到服务端。
-4. **加统一异常处理**：写 `@app.exception_handler`，对应 `@ControllerAdvice`，把业务异常集中映射成状态码。
-5. **加鉴权**：`OAuth2PasswordBearer` + JWT，用 `Depends` 做"当前用户"依赖，对应 Spring Security 的 Filter + `@AuthenticationPrincipal`。
-6. **加 RAG**：文档切分 → 向量库（如 pgvector / Chroma）→ retriever 接进链，`prompt | retriever` 组合。
+3. **仓库层 + 服务层**：`app/repositories/` 只做数据访问（一表一仓库），`app/services/` 只做业务编排。路由不直接碰 `AsyncSession`，对应 Spring 的 `@Repository` / `@Service` 分层。
+4. **流式落库**：对话时先写一条 `status=STREAMING` 的 `Message`，流结束改 `COMPLETED`；Redis 做增量缓冲，断线重连能从 DB 续上。
+5. **就绪探针加 DB / Redis**：现在 `/health/ready` 只看配置，应该真跑一次 `SELECT 1` 和 `PING`，失败返回 503。
+6. **鉴权**：`OAuth2PasswordBearer` + JWT，用 `Depends` 做"当前用户"依赖，对应 Spring Security 的 Filter + `@AuthenticationPrincipal`。表里 `users` / `auth_sessions` 已经预留好了。
+7. **加 RAG**：文档切分 → 向量库（如 pgvector / Chroma）→ retriever 接进链，`prompt | retriever` 组合。
+

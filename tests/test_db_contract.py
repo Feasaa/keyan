@@ -13,13 +13,12 @@ import contextlib
 from dataclasses import dataclass
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
 from app.core.config import get_settings
 from app.core.snowflake import SnowflakeGenerator
 from app.db import Base, Message, MessageRole, MessageStatus, dispose_engine
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 
 @dataclass(frozen=True)

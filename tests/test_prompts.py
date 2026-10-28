@@ -6,12 +6,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
-
 from app.core.config import Settings
 from app.prompts import PromptKey, get_prompt
 from app.prompts.loader import PromptConfigError
 from app.prompts.registry import PromptRegistry
+from fastapi.testclient import TestClient
 
 CHAT = "/api/v1/chat"
 

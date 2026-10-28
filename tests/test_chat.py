@@ -36,8 +36,9 @@ def test_chat_success(client: TestClient, stub_llm: Callable[..., Any]) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["answer"] == "LangChain 是一个 LLM 应用开发框架。"
-    assert body["model"] == "stub-model"
+    assert body["code"] == 0
+    assert body["data"]["answer"] == "LangChain 是一个 LLM 应用开发框架。"
+    assert body["data"]["model"] == "stub-model"
     assert stub.calls[0]["message"] == "用一句话介绍 LangChain"
     assert stub.calls[0]["history"] == []
 
@@ -93,7 +94,10 @@ def test_chat_not_configured(client: TestClient, stub_llm: Callable[..., Any]) -
     response = client.post(CHAT, json={"message": "你好"})
 
     assert response.status_code == 503
-    assert "LLM 未配置" in response.json()["detail"]
+    body = response.json()
+    assert body["code"] == 22503
+    assert "LLM 未配置" in body["message"]
+    assert body["data"] is None
 
 
 def test_chat_upstream_error_maps_to_502(
@@ -105,10 +109,11 @@ def test_chat_upstream_error_maps_to_502(
     response = client.post(CHAT, json={"message": "你好"})
 
     assert response.status_code == 502
-    detail = response.json()["detail"]
-    assert "RuntimeError" in detail
-    assert "sk-secret-leak" not in detail
-    assert "Incorrect API key" not in detail
+    body = response.json()
+    assert body["code"] == 22502
+    assert "RuntimeError" in body["message"]
+    assert "sk-secret-leak" not in body["message"]
+    assert "Incorrect API key" not in body["message"]
 
 
 def test_status(client: TestClient, stub_llm: Callable[..., Any]) -> None:
@@ -117,7 +122,7 @@ def test_status(client: TestClient, stub_llm: Callable[..., Any]) -> None:
     response = client.get(f"{CHAT}/status")
 
     assert response.status_code == 200
-    body = response.json()
+    body = response.json()["data"]
     assert body["configured"] is False
     assert body["model"] == "stub-model"
     assert body["base_url"] == ""
@@ -185,7 +190,9 @@ def test_stream_not_configured_returns_503(
     response = client.post(STREAM, json={"message": "你好"})
 
     assert response.status_code == 503
-    assert "LLM 未配置" in response.json()["detail"]
+    body = response.json()
+    assert body["code"] == 22503
+    assert "LLM 未配置" in body["message"]
 
 
 def test_stream_upstream_error_emits_error_event(
@@ -201,7 +208,8 @@ def test_stream_upstream_error_emits_error_event(
     frames = parse_sse(body)
     errors = [data for event, data in frames if event == "error"]
     assert len(errors) == 1
-    assert '"code":502' in errors[0]
+    # 流内错误码和 JSON 接口用同一套，不是裸 HTTP 状态码
+    assert '"code":22502' in errors[0]
     assert "sk-secret-leak" not in errors[0]
     assert ("done", "[DONE]") not in frames
 

@@ -28,8 +28,10 @@ services:
     volumes:
       # 命名卷：数据在卷里，容器可随时重建。删数据请显式 docker compose down -v
       - mysql-data:/var/lib/mysql
-      # 只在数据目录为空时执行，且按文件名顺序：01-schema.sql
-      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+      # 这里不再挂 docker-entrypoint-initdb.d：表结构由 Alembic 管理。
+      # 两处都定义 schema 必然漂移（实测注释和索引就对不上），
+      # 而且 alembic_version 和自建的 schema_migrations 会互相打架。
+      # 建表请执行：alembic upgrade head
       # 注意挂到 conf.d-src 而不是 /etc/mysql/conf.d：
       #   1) 直接挂 conf.d 会覆盖镜像自带的 mysql.cnf / mysqldump.cnf；
       #   2) 更要命的是 Windows 上 bind mount 权限恒为 0777，

@@ -14,8 +14,9 @@ def test_liveness_ok(client: TestClient) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "ok"
-    assert "version" in body
+    assert body["code"] == 0
+    assert body["data"]["status"] == "ok"
+    assert "version" in body["data"]
 
 
 def test_readiness_ready(client: TestClient, stub_llm: Callable[..., Any]) -> None:
@@ -24,7 +25,7 @@ def test_readiness_ready(client: TestClient, stub_llm: Callable[..., Any]) -> No
     response = client.get(READY)
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ready", "checks": {"llm": "configured"}}
+    assert response.json()["data"] == {"status": "ready", "checks": {"llm": "configured"}}
 
 
 def test_readiness_degraded_when_llm_missing(
@@ -36,7 +37,7 @@ def test_readiness_degraded_when_llm_missing(
     response = client.get(READY)
 
     assert response.status_code == 200
-    assert response.json() == {
+    assert response.json()["data"] == {
         "status": "degraded",
         "checks": {"llm": "not_configured"},
     }

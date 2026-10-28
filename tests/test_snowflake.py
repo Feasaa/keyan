@@ -10,7 +10,6 @@ import threading
 from datetime import UTC, datetime
 
 import pytest
-
 from app.core.snowflake import (
     EPOCH_MS,
     SEQUENCE_MASK,

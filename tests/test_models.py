@@ -6,13 +6,12 @@
 """
 
 import pytest
-from sqlalchemy.dialects import mysql
-
 from app.core.config import Settings
 from app.db import Base
 from app.db.base import utcnow
 from app.db.enums import MessageRole, MessageStatus, UserStatus
 from app.db.types import IntEnumValue, StrEnumValue
+from sqlalchemy.dialects import mysql
 
 MYSQL = mysql.dialect()
 

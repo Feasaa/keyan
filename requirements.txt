@@ -19,6 +19,11 @@ aiomysql>=0.2
 # 没有 cryptography 连握手都过不去
 cryptography>=42
 
+# 迁移：表结构的唯一真相源
+alembic>=1.13
+
 # 开发 / 测试依赖
 pytest>=8.0
 httpx>=0.27
+# 代码检查 / 格式化，配置在 pyproject.toml 的 [tool.ruff]
+ruff>=0.12

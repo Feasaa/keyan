@@ -1,19 +1,24 @@
 """对话端点：一次性响应、SSE 流式响应、配置状态查询。
 
-分层：路由只做参数校验、状态码翻译与协议适配，链路细节全在 LLMService。
-SSE 有两种错误通道：
-    流开始前 → HTTPException（客户端拿到真实的 503）
-    流开始后 → event=error 帧（响应头已发出，无法再改状态码）
-帧编码、ping 心跳、断线取消、停机收尾都由 sse-starlette 处理。
+分层：路由只做参数校验、协议适配与响应组装，链路细节全在 LLMService。
+
+错误处理现在**全部交给全局处理器**（app/core/exception_handlers.py）：
+路由里不再出现 HTTPException，业务异常直接往上抛，
+由 AppError 自带的错误码决定状态码与文案。
+
+SSE 仍有两种错误通道，这一点没变：
+    流开始前 → 抛 AppError，走全局处理器，客户端拿到真实状态码
+    流开始后 → 响应头已发出，只能往流里写 event=error 帧
 """
 
 import asyncio
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Request
 from sse_starlette import EventSourceResponse, JSONServerSentEvent, ServerSentEvent
 
 from app.core.config import Settings, get_settings
+from app.core.response import ApiResponse, ok
 from app.core.sse import EVENT_DELTA, EVENT_DONE, EVENT_ERROR, EVENT_META, SSE_DONE
 from app.schemas.chat import (
     ChatRequest,
@@ -23,11 +28,7 @@ from app.schemas.chat import (
     StreamError,
     StreamMeta,
 )
-from app.services.exceptions import (
-    LLMNotConfiguredError,
-    LLMUpstreamError,
-    ServiceError,
-)
+from app.services.exceptions import LLMUpstreamError, ServiceError
 from app.services.llm_service import (
     LLMService,
     StreamFinished,
@@ -38,46 +39,18 @@ from app.services.llm_service import (
 router = APIRouter()
 
 
-def _ensure_configured(service: LLMService) -> None:
-    try:
-        service.ensure_configured()
-    except LLMNotConfiguredError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
-
-
 @router.post(
     "",
-    response_model=ChatResponse,
+    response_model=ApiResponse[ChatResponse],
     summary="对话（一次性返回）",
     description="等待模型生成完毕后一次性返回，适合短回答与服务端调用。",
 )
 async def chat(
     payload: ChatRequest,
     service: LLMService = Depends(get_llm_service),
-) -> ChatResponse:
-    try:
-        answer, model_name = service.chat(payload)
-    except LLMNotConfiguredError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(exc),
-        ) from exc
-    except LLMUpstreamError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(exc),
-        ) from exc
-    except ServiceError as exc:
-        # 兜底：同样不透传原始信息
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="LLM 服务内部异常",
-        ) from exc
-
-    return ChatResponse(answer=answer, model=model_name)
+) -> ApiResponse[ChatResponse]:
+    answer, model_name = service.chat(payload)
+    return ok(ChatResponse(answer=answer, model=model_name))
 
 
 @router.post(
@@ -85,7 +58,8 @@ async def chat(
     summary="对话（SSE 流式）",
     description=(
         "以 text/event-stream 逐块返回：event=delta 为增量文本，"
-        "event=done 携带 [DONE] 表示结束，event=error 携带错误码。"
+        "event=meta 携带模型与用量，event=done 表示结束，event=error 携带错误码。"
+        "流式接口不套统一响应结构 —— 它本身是事件流，不是单个 JSON。"
     ),
     response_class=EventSourceResponse,
     responses={
@@ -100,8 +74,9 @@ async def chat_stream(
     service: LLMService = Depends(get_llm_service),
     settings: Settings = Depends(get_settings),
 ) -> EventSourceResponse:
-    # 配置缺失属于请求前置条件，必须在响应头下发前拦掉
-    _ensure_configured(service)
+    # 配置缺失属于请求前置条件，必须在响应头下发前拦掉。
+    # 这里抛出的 AppError 会被全局处理器接住 —— 此时流还没开始。
+    service.ensure_configured()
 
     return EventSourceResponse(
         _event_source(service, payload),
@@ -130,16 +105,11 @@ async def _event_source(
     except asyncio.CancelledError:
         # 客户端断开：静默结束，不再写任何帧
         raise
-    except LLMUpstreamError as exc:
+    except (LLMUpstreamError, ServiceError) as exc:
+        # 流已开始，状态码改不了了，只能用事件传递。
+        # code 用业务错误码而不是裸 HTTP 状态码，和 JSON 接口保持一致。
         yield JSONServerSentEvent(
-            data=StreamError(code=status.HTTP_502_BAD_GATEWAY, message=str(exc)).model_dump(),
-            event=EVENT_ERROR,
-        )
-    except ServiceError:
-        yield JSONServerSentEvent(
-            data=StreamError(
-                code=status.HTTP_502_BAD_GATEWAY, message="LLM 服务内部异常"
-            ).model_dump(),
+            data=StreamError(code=exc.error_code.code, message=exc.message).model_dump(),
             event=EVENT_ERROR,
         )
 
@@ -154,18 +124,20 @@ def _meta(finished: StreamFinished) -> StreamMeta:
 
 @router.get(
     "/status",
-    response_model=ChatStatusResponse,
+    response_model=ApiResponse[ChatStatusResponse],
     summary="对话功能状态",
     description="探测 LLM 是否已配置、当前使用哪版提示词，不打真网络。",
 )
 async def chat_status(
     service: LLMService = Depends(get_llm_service),
-) -> ChatStatusResponse:
+) -> ApiResponse[ChatStatusResponse]:
     prompt = service.prompt
-    return ChatStatusResponse(
-        configured=service.configured,
-        model=service.model,
-        base_url=service.base_url,
-        prompt_id=prompt.id,
-        prompt_version=prompt.version,
+    return ok(
+        ChatStatusResponse(
+            configured=service.configured,
+            model=service.model,
+            base_url=service.base_url,
+            prompt_id=prompt.id,
+            prompt_version=prompt.version,
+        )
     )

@@ -12,6 +12,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import api_router
 from app.core.config import settings
+from app.core.exception_handlers import register_exception_handlers
+from app.core.middleware import RequestContextMiddleware
 from app.db import dispose_engine
 
 
@@ -49,6 +51,12 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # 后加的在外层：trace_id 要在 CORS 之前拿到，
+    # 这样连被 CORS 拒绝的响应也带 X-Request-ID
+    application.add_middleware(RequestContextMiddleware)
+
+    register_exception_handlers(application)
 
     application.include_router(api_router, prefix=settings.API_PREFIX)
     return application

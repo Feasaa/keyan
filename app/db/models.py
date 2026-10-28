@@ -1,8 +1,8 @@
-"""ORM 模型：与 deploy/mysql/init/01-schema.sql 一一对应。
+"""ORM 模型：与 alembic/versions 里的迁移一一对应。
 
-表结构由 SQL 脚本管理，不由 `Base.metadata.create_all()` 创建 ——
+表结构由 Alembic 管理，不由 `Base.metadata.create_all()` 创建 ——
 生产改结构要走迁移，不能靠应用启动时偷偷建表。
-模型在这里的作用是：查询、写入、以及给迁移工具提供比对基准。
+模型在这里的作用是：查询、写入、以及给 autogenerate 提供比对基准。
 
 因此**两边的约束名必须逐字一致**（uk_users_username、fk_msg_conv ...），
 否则 Alembic 会认为约束被改过，反复生成 drop/create。
