@@ -15,9 +15,21 @@ addopts = "-q"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# 只把 app/ 视为本项目的 first-party 源码根。
+# 不显式声明的话 ruff 会把项目根下的 alembic/（迁移脚本目录）当成 first-party 包，
+# 从而把 `from alembic import op` 误判为本地导入并单独分组。
+src = ["app"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 # B008（默认值里调用函数）与 FastAPI 的 Depends(...) 惯用写法冲突，
 # 这是 FastAPI 官方推荐的依赖注入位置，属已知误报，工业项目惯例是忽略。
 extend-ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# alembic/versions 下是 `alembic revision` 由 script.py.mako 生成的迁移脚本，
+# 不作为手写代码维护（改表结构应生成新迁移，而不是手改历史迁移）。
+# 只放行两条模板本身无法满足的规则，其余检查（E501/UP/B/F 等）仍然生效：
+#   F401 —— `alembic revision -m` 生成空迁移时，模板必然带入未使用的 sa / op
+#   I001 —— 模板占位符 `${imports}` 为空时，import 块尾部会多出一个空行
+"alembic/versions/*.py" = ["F401", "I001"]

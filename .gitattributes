@@ -1,0 +1,15 @@
+# 仓库内一律存 LF，Windows 检出也不再自动转 CRLF。
+# 原因：deploy/ 下的 *.cnf / *.conf 会被 bind mount 进 Linux 容器，
+# 带 \r 的配置文件在某些解析器上会静默失效（Redis 的 ACL 尤其敏感）。
+* text=auto eol=lf
+
+# Windows 专用脚本反过来，必须保留 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制，别做换行符转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary
