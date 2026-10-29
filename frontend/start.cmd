@@ -8,7 +8,7 @@ if not errorlevel 1 (
   if exist "%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe" (
     "%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe" start.cjs
   ) else (
-    echo Please install Node.js 20 or newer, then run start.cmd again.
+    echo Please install Node.js 24 LTS, then run start.cmd again.
   )
 )
 pause

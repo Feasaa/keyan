@@ -33,7 +33,7 @@ uvicorn app.main:app --reload --port 8000
 
 ### 聊天前端
 
-仓库包含可直接运行的[启学聊天前端](frontend/README.md)：启动后端后，Windows 用户双击 `frontend/start.cmd`，其他平台运行 `node frontend/server.cjs`，访问 http://127.0.0.1:4318 。运行无需安装前端依赖，支持登录注册、流式聊天与续传、历史会话和评价。验证码启用时的 HTTPS 配置及测试方法见前端说明。
+仓库包含基于 **Vue 3 + Vite** 的[启学聊天前端](frontend/README.md)，支持登录注册、流式聊天与续传、历史会话和评价。在 `frontend` 目录先执行 `npm ci --ignore-scripts --no-audit --no-fund`，开发运行 `npm run dev`；正式运行 `npm start` 或双击 `start.cmd`，访问 http://127.0.0.1:4318 。Node.js 建议使用 24 LTS。验证码 HTTPS 配置、组件分工和测试方法见前端说明。
 
 验证：
 

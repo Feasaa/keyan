@@ -3,11 +3,11 @@ export class ApiError extends Error {
 }
 
 export class ApiClient {
-  constructor({ fetcher = globalThis.fetch.bind(globalThis), storage = globalThis.sessionStorage, onExpire = () => {} } = {}) {
-    this.fetcher = fetcher; this.storage = storage; this.onExpire = onExpire; this.refreshing = null; this.sessionVersion = 0;
+  constructor({ fetcher = globalThis.fetch.bind(globalThis), storage = globalThis.sessionStorage, onExpire = () => {}, onChange = () => {} } = {}) {
+    this.fetcher = fetcher; this.storage = storage; this.onExpire = onExpire; this.onChange = onChange; this.refreshing = null; this.sessionVersion = 0;
     try { this.auth = JSON.parse(storage?.getItem('qixue-auth-v1') || 'null'); } catch { this.auth = null; }
   }
-  save(value, { rotating = false } = {}) { if (!rotating) this.sessionVersion++; this.auth = value; try { value ? this.storage?.setItem('qixue-auth-v1', JSON.stringify(value)) : this.storage?.removeItem('qixue-auth-v1'); } catch { /* Memory-only session remains usable. */ } }
+  save(value, { rotating = false } = {}) { if (!rotating) this.sessionVersion++; this.auth = value; this.onChange(value); try { value ? this.storage?.setItem('qixue-auth-v1', JSON.stringify(value)) : this.storage?.removeItem('qixue-auth-v1'); } catch { /* Memory-only session remains usable. */ } }
   get loggedIn() { return Boolean(this.auth?.token?.access_token); }
   async refresh() {
     if (!this.auth?.token?.refresh_token) return false;

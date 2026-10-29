@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { ApiClient, readSSE } from '../api-client.mjs';
 const require = createRequire(import.meta.url), http = require('node:http');
 const { createServer } = require('../server.cjs');
@@ -71,14 +74,23 @@ test('Proxy forwards auth, SSE and resume ID, blocks private files and foreign o
   const calls = [];
   const backend = http.createServer((req, res) => { calls.push({ url: req.url, headers: req.headers }); res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.write('event: delta\ndata: {"delta":"真实接口格式"}\n\n'); res.end('event: done\ndata: [DONE]\n\n'); });
   const backendUrl = await start(backend);
-  const front = createServer({ backend: backendUrl, envValues: { VAPTCHA_VID: 'public-vid', VAPTCHA_VKEY: 'private-key', LLM_API_KEY: 'not-for-browser' } }); const url = await start(front);
+  const dist = mkdtempSync(join(tmpdir(), 'qixue-test-'));
+  mkdirSync(join(dist, 'assets'));
+  writeFileSync(join(dist, 'index.html'), '<title>启学</title><script src="/assets/index-test.js"></script>');
+  writeFileSync(join(dist, 'assets/index-test.js'), 'console.log("fixture")');
+  writeFileSync(join(dist, 'assets/index-test.css'), 'body { margin: 0 }');
+  const front = createServer({ dist, backend: backendUrl, envValues: { VAPTCHA_VID: 'public-vid', VAPTCHA_VKEY: 'private-key', LLM_API_KEY: 'not-for-browser' } }); const url = await start(front);
   try {
     const config = await (await fetch(url + '/frontend-config.json')).json(); assert.deepEqual(Object.keys(config).sort(), ['captchaEnabled', 'captchaVid', 'version']); assert.equal(config.captchaEnabled, true); assert.equal(JSON.stringify(config).includes('private-key'), false);
-    for (const file of ['/.env', '/server.cjs', '/README.md', '/../.env']) assert.equal((await fetch(url + file)).status, 404);
+    for (const file of ['/.env', '/server.cjs', '/README.md', '/../.env', '/src/main.js', '/node_modules/vue/index.js', '/assets/../../api-client.mjs']) assert.equal((await fetch(url + file)).status, 404);
     assert.equal((await fetch(url + '/api/v1/auth/login', { method: 'POST', headers: { Origin: 'http://foreign.invalid' } })).status, 403);
     const response = await fetch(url + '/api/v1/chat/stream/373814368841760768', { headers: { Authorization: 'Bearer test-token', 'Last-Event-ID': '123-0' } });
     const frames = []; await readSSE(response, e => { frames.push(e); }); assert.equal(frames[1].event, 'done');
     assert.equal(calls[0].headers.authorization, 'Bearer test-token'); assert.equal(calls[0].headers['last-event-id'], '123-0');
     const page = await fetch(url + '/'); assert.equal(page.status, 200); assert.match(await page.text(), /启学/);
-  } finally { await close(front); await close(backend); }
+    for (const [name, mime] of [['index-test.js', 'text/javascript'], ['index-test.css', 'text/css']]) {
+      const asset = await fetch(url + '/assets/' + name);
+      assert.equal(asset.status, 200); assert.match(asset.headers.get('content-type'), new RegExp(mime));
+    }
+  } finally { await close(front); await close(backend); rmSync(dist, { recursive: true, force: true }); }
 });

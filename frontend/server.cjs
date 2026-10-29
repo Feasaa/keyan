@@ -9,6 +9,7 @@ function envFile(filename) {
   catch (e) { if (e.code !== 'ENOENT') throw e; return {}; }
 }
 function createServer(options = {}) {
+  const dist = options.dist || path.join(__dirname, 'dist');
   const backend = new URL(options.backend || process.env.BACKEND_URL || 'http://127.0.0.1:8000');
   if (!['http:', 'https:'].includes(backend.protocol) || backend.username || backend.password || backend.search || backend.hash || backend.pathname !== '/') throw new Error('BACKEND_URL must be an http(s) origin.');
   const values = options.envValues || envFile(process.env.BACKEND_ENV_FILE || path.join(__dirname, '..', '.env'));
@@ -37,11 +38,15 @@ function createServer(options = {}) {
       req.on('aborted', () => upstream.destroy()); res.on('close', () => { if (!res.writableEnded) upstream.destroy(); });
       req.pipe(upstream); return;
     }
-    if (req.url === '/frontend-config.json' && req.method === 'GET') return send(res, 200, { captchaEnabled, captchaVid, version: '1.0.0' });
-    const files = { '/': ['index.html', 'text/html'], '/style.css': ['style.css', 'text/css'], '/app.js': ['app.js', 'text/javascript'], '/api-client.mjs': ['api-client.mjs', 'text/javascript'], '/markdown.mjs': ['markdown.mjs', 'text/javascript'], '/icon.svg': ['icon.svg', 'image/svg+xml'] };
-    const file = files[req.url.split('?')[0]];
-    if (req.method !== 'GET' || !file) return send(res, 404, { code: 10404, message: '未找到页面。', data: null });
-    fs.readFile(path.join(__dirname, file[0]), (err, content) => { if (err) return send(res, 500, { message: '页面文件缺失。' }); res.writeHead(200, { 'Content-Type': file[1] + '; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(content); });
+    if (req.url === '/frontend-config.json' && req.method === 'GET') return send(res, 200, { captchaEnabled, captchaVid, version: '2.0.0' });
+    const pathname = req.url.split('?')[0];
+    const types = { '.html': 'text/html', '.svg': 'image/svg+xml', '.js': 'text/javascript', '.css': 'text/css' };
+    const filename = pathname === '/' ? 'index.html' : pathname === '/icon.svg' ? 'icon.svg' : /^\/assets\/[A-Za-z0-9_-]+\.(js|css)$/.test(pathname) ? pathname.slice(1) : null;
+    if (req.method !== 'GET' || !filename) return send(res, 404, { code: 10404, message: '未找到页面。', data: null });
+    fs.readFile(path.join(dist, filename), (err, content) => {
+      if (err) return send(res, filename === 'index.html' ? 503 : 404, { message: filename === 'index.html' ? '前端尚未构建，请先运行 npm ci 和 npm run build。' : '未找到页面文件。' });
+      res.writeHead(200, { 'Content-Type': types[path.extname(filename)] + '; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(content);
+    });
   };
   return tls ? https.createServer(tls, handler) : http.createServer(handler);
 }
