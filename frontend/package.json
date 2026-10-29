@@ -1,0 +1,14 @@
+{
+  "name": "qixue-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local chat frontend for the keyan FastAPI backend",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node start.cjs",
+    "test": "node --test",
+    "check": "node --check app.js && node --check api-client.mjs && node --check markdown.mjs && node --check server.cjs && node --check start.cjs"
+  },
+  "devDependencies": { "jsdom": "26.1.0" }
+}

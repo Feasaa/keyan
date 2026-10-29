@@ -31,6 +31,10 @@ uvicorn app.main:app --reload --port 8000
 
 打开 http://127.0.0.1:8000/docs 即可调试（右上角 Authorize 可填令牌）。
 
+### 聊天前端
+
+仓库包含可直接运行的[启学聊天前端](frontend/README.md)：启动后端后，Windows 用户双击 `frontend/start.cmd`，其他平台运行 `node frontend/server.cjs`，访问 http://127.0.0.1:4318 。运行无需安装前端依赖，支持登录注册、流式聊天与续传、历史会话和评价。验证码启用时的 HTTPS 配置及测试方法见前端说明。
+
 验证：
 
 ```bash
